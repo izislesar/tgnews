@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - TZ=Europe/Berlin
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data:/data
+      - ./channels.txt:/app/channels.txt:ro
+      - ./prompt.txt:/app/prompt.txt:ro
+      

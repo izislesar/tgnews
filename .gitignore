@@ -1,0 +1,8 @@
+# секреты и состояние — НЕ коммитить
+.env
+data/
+*.session
+*.session-journal
+__pycache__/
+*.pyc
+.tgz

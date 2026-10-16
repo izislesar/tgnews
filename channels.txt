@@ -1,0 +1,17 @@
+# По одному юзернейму на строку, # — комментарий
+eurointel
+ClashReport
+Alibk3
+intelslava
+entre_guerras
+Livleak
+rnintel
+Old_Glory_Vortex
+OpenlyBiased
+thewarreporter
+BellumActaNews
+LegionEuropa
+AussieCossack
+apokalypsenews
+# theriotimes — посты там голые ссылки на статьи, скипается фильтром; раскомментируй если передумаешь
+# theriotimes
