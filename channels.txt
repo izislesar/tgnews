@@ -1,17 +1,17 @@
-# По одному юзернейму на строку, # — комментарий
+# По одному юзернейму на строку, # — комментарий. Новые каналы авто-джойнятся при рестарте.
 eurointel
 ClashReport
 Alibk3
 intelslava
 entre_guerras
-Livleak
 rnintel
 Old_Glory_Vortex
 OpenlyBiased
 thewarreporter
 BellumActaNews
 LegionEuropa
-AussieCossack
+tupireport
 apokalypsenews
-# theriotimes — посты там голые ссылки на статьи, скипается фильтром; раскомментируй если передумаешь
-# theriotimes
+tabzlive
+wfwitness
+# исключены: Livleak, AussieCossack, theriotimes (голые ссылки), VRiDnaJBz480Mjc6 (приватный)

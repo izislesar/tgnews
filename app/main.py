@@ -326,7 +326,7 @@ async def main():
         )
     print(f"[run] channels: {CHANNELS}")
     await build_allow(client)          # allowlist + авто-джойн каналов
-    store.purge_not_in(ALLOW_BARE)     # чистим очередь от чужих источников
+    store.purge_not_in(ALLOW_BARE, ALLOW_MARKED)  # чистим очередь от чужих источников
     # резолвим цель (группа по числовому ID, бот по @username или Saved Messages)
     DRAFT_TARGET = await resolve_target(client, RAW_TARGET)
     asyncio.create_task(backfill())

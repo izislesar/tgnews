@@ -31,10 +31,15 @@ class Store:
             )
             self.con.commit()
 
-    def purge_not_in(self, allow_bare):
+    def purge_not_in(self, allow_bare, allow_marked=()):
+        """src в очереди бывает в двух формах: bare (бэкфилл) и -100marked (реалтайм).
+        Чистим только то, что не похоже ни на одну из них."""
+        def ok(src):
+            return src in allow_bare or src in allow_marked or \
+                   (isinstance(src, int) and (-10**12 - src) in allow_bare)
         with self.lock:
             rows = self.con.execute("SELECT DISTINCT src FROM queue WHERE state='pending'").fetchall()
-            bad = [r[0] for r in rows if r[0] not in allow_bare]
+            bad = [r[0] for r in rows if not ok(r[0])]
             for src in bad:
                 self.con.execute("DELETE FROM queue WHERE src=? AND state='pending'", (src,))
             self.con.commit()
