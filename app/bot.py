@@ -36,8 +36,7 @@ MENU = InlineKeyboardMarkup(inline_keyboard=[
 ])
 
 CARD = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="В отбор", callback_data="pool"),
-     InlineKeyboardButton(text="Отказ", callback_data="rej")],
+    [InlineKeyboardButton(text="В отбор", callback_data="pool")],
 ])
 
 
@@ -132,24 +131,18 @@ class AdminBot:
             if not qid or not self.store.post_by_qid(qid):
                 await cb.answer("Пост не найден", show_alert=False)
                 return
-            if cb.data == "pool":
-                if self.store.pooled_by_anyone(qid):
-                    await cb.answer("Этот пост уже в отборе")
-                    await self._edit_card(cb.message, None)
-                    return
-                ok = await self._send_to_pool(qid, cb.from_user)
-                if ok:
-                    self.store.add_decision(qid, cb.from_user.id, "pool")
-                    await cb.answer("Добавлено в отбор")
-                    await self._edit_card(cb.message, "— в отборе")
-                else:
-                    await cb.answer("Не вышло: чат отбора не задан (/set_approval_chat)",
-                                    show_alert=True)
+            if self.store.pooled_by_anyone(qid):
+                await cb.answer("Этот пост уже в отборе")
+                await self._edit_card(cb.message, None)
+                return
+            ok = await self._send_to_pool(qid, cb.from_user)
+            if ok:
+                self.store.add_decision(qid, cb.from_user.id, "pool")
+                await cb.answer("Добавлено в отбор")
+                await self._edit_card(cb.message, "— в отборе")
             else:
-                # отказ: пост больше не будет предлагаться ЭТОМУ админу
-                self.store.add_decision(qid, cb.from_user.id, "reject")
-                await cb.answer("Скрыто из твоей выдачи")
-                await self._edit_card(cb.message, "— скрыто")
+                await cb.answer("Не вышло: чат отбора не задан (/set_approval_chat)",
+                                show_alert=True)
 
         # релей: юзербот постит медиа с маркером #Q в канал-релей
         @self.dp.channel_post(F.chat.id == self.relay_id)
