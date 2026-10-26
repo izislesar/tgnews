@@ -35,6 +35,11 @@ MENU = InlineKeyboardMarkup(inline_keyboard=[
      InlineKeyboardButton(text="Статистика", callback_data="stats")],
 ])
 
+CARD = InlineKeyboardMarkup(inline_keyboard=[
+    [InlineKeyboardButton(text="В отбор", callback_data="pool"),
+     InlineKeyboardButton(text="Отказ", callback_data="rej")],
+])
+
 
 def fmt_html(text: str) -> str:
     s = html.escape(text, quote=False)
@@ -56,18 +61,29 @@ class AdminBot:
         self.worker = worker
         self.admin_ids = admin_ids
         self.relay_id = int(store.get_setting("relay_chat_id", "0") or 0)
+        self.pool_chat = int(os.environ.get("APPROVAL_CHAT_ID") or
+                             store.get_setting("approval_chat_id", "0") or 0)
         self.relay_buffers = {}
         self._register()
 
     # ---------- хендлеры ----------
     def _register(self):
-        _CMDS = ("get", "add_channel", "delete_channel", "list_channels", "stats", "help", "start", "menu")
+        _CMDS = ("get", "add_channel", "delete_channel", "list_channels", "stats",
+                 "set_approval_chat", "help", "start", "menu")
 
         @self.dp.message(Command(*_CMDS), F.chat.type == "private")
         async def commands(message: Message, command: CommandObject):
             if not message.from_user or message.from_user.id not in self.admin_ids:
                 return  # чужих молча игнорируем
             await self._route(message, command)
+
+        @self.dp.message(Command("set_approval_chat"), F.chat.type.in_({"group", "supergroup"}))
+        async def set_pool_chat(message: Message):
+            if not message.from_user or message.from_user.id not in self.admin_ids:
+                return
+            self.store.set_setting("approval_chat_id", str(message.chat.id))
+            self.pool_chat = message.chat.id
+            await message.answer("Чат отбора назначен. Одобренные посты будут падать сюда.")
 
         @self.dp.message(F.chat.type == "private", F.text.startswith("/"))
         async def unknown_cmd(message: Message):
@@ -84,6 +100,33 @@ class AdminBot:
             route = {"get": self.cmd_get, "list": self.cmd_list,
                      "stats": self.cmd_stats, "help": self.cmd_help}
             await route[cb.data](cb.message, None, admin_id=cb.from_user.id)
+
+        @self.dp.callback_query(F.data.in_({"pool", "rej"}))
+        async def card_cb(cb: CallbackQuery):
+            if cb.from_user.id not in self.admin_ids:
+                await cb.answer("Нет доступа", show_alert=False)
+                return
+            qid = self.store.card_qid(cb.message.chat.id, cb.message.message_id)
+            if not qid or not self.store.post_by_qid(qid):
+                await cb.answer("Пост не найден", show_alert=False)
+                return
+            if cb.data == "pool":
+                if self.store.pooled_by_anyone(qid):
+                    await cb.answer("Этот пост уже в отборе")
+                    await self._edit_card(cb.message, None)
+                    return
+                ok = await self._send_to_pool(qid, cb.from_user)
+                if ok:
+                    self.store.add_decision(qid, cb.from_user.id, "pool")
+                    await cb.answer("Добавлено в отбор")
+                    await self._edit_card(cb.message, "— в отборе")
+                else:
+                    await cb.answer("Не вышло: чат отбора не задан (/set_approval_chat)",
+                                    show_alert=True)
+            else:
+                self.store.add_decision(qid, cb.from_user.id, "reject")
+                await cb.answer("Отклонено")
+                await self._edit_card(cb.message, "— отклонено")
 
         # релей: юзербот постит медиа с маркером #Q в канал-релей
         @self.dp.channel_post(F.chat.id == self.relay_id)
@@ -197,11 +240,12 @@ class AdminBot:
             if out is None:  # SKIP (реклама/не-новость)
                 self.store.mark_dead(qid)
                 continue
+            self.store.set_ru_text(qid, out)
 
             url = f"https://t.me/{username}/{ids.split(',')[0]}"
             body = fmt_html(out) + "\n" * LINK_GAP + f"<a href=\"{url}\">{url}</a>"
             try:
-                await self._deliver(message.chat.id, key if has_media else None, body)
+                await self._deliver(message.chat.id, key if has_media else None, body, qid=qid)
                 delivered += 1
                 self.store.mark_issued(qid, admin)
             except Exception as e:
@@ -209,28 +253,69 @@ class AdminBot:
         await message.answer(f"Выдано {delivered} из {n}")
         self.store.set_last_request(admin)
 
-    async def _deliver(self, chat_id: int, cache_key: str | None, body_html: str):
-        """Одно сообщение: медиа+подпись (<=1024) или медиа+текст следом, или просто текст."""
+    async def _deliver(self, chat_id: int, cache_key: str | None, body_html: str,
+                       qid: int | None = None):
+        """Одно сообщение: медиа+подпись (<=1024) или медиа+текст следом, или просто текст.
+        С qid вешает карточку модерации (кнопки В отбор/Отказ)."""
         items = json.loads(cache_key and self.store.cached_fileids(cache_key) or "[]")
         items = [it for it in items if it.get("id")]
+        markup = CARD if qid else None
+        sent = []
         if not items:
-            await self.bot.send_message(chat_id, body_html, parse_mode="HTML")
-            return
-        caption = body_html if len(body_html) <= 1024 else None
-        if len(items) == 1:
-            it = items[0]
-            kwargs = {"caption": caption, "parse_mode": "HTML"} if caption else {}
-            await getattr(self.bot, SENDERS[it["kind"]])(chat_id, it["id"], **kwargs)
+            sent.append(await self.bot.send_message(chat_id, body_html, parse_mode="HTML",
+                                                    reply_markup=markup))
         else:
-            media = []
-            for i, it in enumerate(items):
-                if i == 0 and caption:
-                    media.append(KIND_MAP[it["kind"]](media=it["id"], caption=caption, parse_mode="HTML"))
-                else:
-                    media.append(KIND_MAP[it["kind"]](media=it["id"]))
-            await self.bot.send_media_group(chat_id, media=media)
-        if caption is None:
-            await self.bot.send_message(chat_id, body_html, parse_mode="HTML")
+            caption = body_html if len(body_html) <= 1024 else None
+            if len(items) == 1:
+                it = items[0]
+                kwargs = {"caption": caption, "parse_mode": "HTML"} if caption else {}
+                sent.append(await getattr(self.bot, SENDERS[it["kind"]])(chat_id, it["id"],
+                                                                          reply_markup=markup, **kwargs))
+            else:
+                media = []
+                for i, it in enumerate(items):
+                    if i == 0 and caption:
+                        media.append(KIND_MAP[it["kind"]](media=it["id"], caption=caption, parse_mode="HTML"))
+                    else:
+                        media.append(KIND_MAP[it["kind"]](media=it["id"]))
+                sent += await self.bot.send_media_group(chat_id, media=media)
+            if caption is None:
+                sent.append(await self.bot.send_message(chat_id, body_html, parse_mode="HTML"))
+        if qid:
+            for m in sent:
+                self.store.map_card(chat_id, m.message_id, qid)
+
+    async def _edit_card(self, message: Message, note: str | None):
+        try:
+            await message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        if note:
+            try:
+                if message.caption:
+                    await message.edit_caption(caption=message.caption + note, parse_mode="HTML")
+                elif message.text:
+                    await message.edit_text(text=message.text + note, parse_mode="HTML")
+            except Exception:
+                pass
+
+    async def _send_to_pool(self, qid: int, user) -> bool:
+        """Копия поста в общий чат отбора + пометка, кто добавил."""
+        if not self.pool_chat:
+            return False
+        post = self.store.post_by_qid(qid)
+        who = f"@{user.username}" if user.username else user.first_name
+        url = f"https://t.me/{post['username']}/{post['ids'].split(',')[0]}"
+        ru = post.get("ru_text") or post.get("text") or ""
+        body = (fmt_html(ru) + "\n" * LINK_GAP + f"<a href=\"{url}\">{url}</a>"
+                + f"\n\nДобавил: {html.escape(who)}")
+        key = post["key"] if post["has_media"] else None
+        try:
+            await self._deliver(self.pool_chat, key, body)
+            return True
+        except Exception as e:
+            print(f"[pool {qid}] {e}")
+            return False
 
     async def cmd_add(self, message: Message, command: CommandObject):
         username = (command.args or "").strip().lstrip("@")
@@ -263,12 +348,17 @@ class AdminBot:
         await message.answer("Каналы-доноры:\n" + "\n".join(lines))
 
     async def cmd_stats(self, message: Message, command: CommandObject, admin_id: int | None = None):
+        from .store import WINDOW_H
         s = self.store.stats()
-        await message.answer(
-            "Очередь:\n"
-            f"- в бэклоге (48ч): {s.get('backlog48h', 0)}\n"
-            f"- каналов активно: {len(self.store.active_usernames())}\n"
-            f"- модель: {llm.MODEL} / фолбэк {llm.FALLBACK_MODEL}")
+        lines = [
+            f"В окне ({int(WINDOW_H)}ч): {s.get('backlog_window', 0)} новых",
+            f"Всего: new={s.get('new', 0)} dead={s.get('dead', 0)} dup={s.get('dup', 0)}",
+            "",
+            "Источники (7 дней): всего / скип / дубли / выдано / в отбор",
+        ]
+        for u, total, dead, dup, iss, pool in self.store.stats_by_source():
+            lines.append(f"@{u}: {total} / {dead or 0} / {dup or 0} / {iss or 0} / {pool or 0}")
+        await message.answer("\n".join(lines))
 
     async def cmd_help(self, message: Message, command: CommandObject, admin_id: int | None = None):
         await message.answer(
@@ -279,9 +369,10 @@ class AdminBot:
             "/add_channel @user — добавить канал-донор\n"
             "/delete_channel @user — убрать канал\n"
             "/list_channels — список каналов\n"
-            "/stats — состояние очереди\n"
+            "/stats — статистика по источникам\n"
+            "/set_approval_chat — назначить этот чат чатом отбора (отправить В нём)\n"
             "/help — эта справка\n\n"
-            "Понравившийся пост пересылай в чат «отбор» — это избранное для доработки.",
+            "Под каждым постом — кнопки: В отбор (в общий чат для доработки) / Отказ.",
             reply_markup=MENU)
 
     # ---------- запуск ----------

@@ -42,6 +42,8 @@ class Worker:
         self.client.add_event_handler(self.on_album, events.Album())
         asyncio.create_task(self.task_loop())
         asyncio.create_task(self.cleanup_loop())
+        asyncio.create_task(self.metrics_loop())
+        asyncio.create_task(self.subs_loop())
 
     async def join_all(self):
         for username in self.store.active_usernames():
@@ -208,6 +210,72 @@ class Worker:
             await self.client(functions.messages.SendMultiMediaRequest(
                 peer=self.relay_ent, multi_media=singles))
         # state=done проставит бот-хендлер, когда получит file_id
+
+    # ---------- рефреш метрик / подписок ----------
+    async def metrics_loop(self):
+        """Раз в METRICS_PERIOD сек подтягивает свежие views/reactions по всем постам в окне,
+        иначе пост, собранный в момент публикации, навсегда остаётся с нулевыми просмотрами."""
+        period = int(os.getenv("METRICS_PERIOD", "600"))
+        while True:
+            try:
+                by_ch = self.store.fresh_ids_by_channel()
+                if by_ch:
+                    qmap = {}
+                    for qid, username, ids in self.store.con.execute(
+                            "SELECT qid, username, ids FROM posts WHERE state='new'"):
+                        for x in ids.split(","):
+                            try:
+                                qmap[(username, int(x))] = qid
+                            except ValueError:
+                                pass
+                    updates = []
+                    for username, ids in by_ch.items():
+                        try:
+                            ent = self._entity(username) if username in self._ents \
+                                else await self.client.get_entity(username)
+                            self._ents[username] = ent
+                            for i in range(0, len(ids), 100):
+                                chunk = ids[i:i + 100]
+                                msgs = await self.client.get_messages(ent, ids=chunk)
+                                for m in msgs:
+                                    if not m:
+                                        continue
+                                    qid = qmap.get((username, m.id))
+                                    if qid is None:
+                                        continue
+                                    reactions = sum(rc.count for rc in m.reactions.results) \
+                                        if m.reactions else 0
+                                    updates.append((qid, m.views or 0, reactions))
+                        except Exception as e:
+                            print(f"[metrics] {username}: {e}")
+                if updates:
+                    self.store.update_metrics(updates)
+                    print(f"[metrics] обновлено постов: {len(updates)}")
+            except Exception as e:
+                print(f"[metrics] {e}")
+            await asyncio.sleep(period)
+
+    async def subs_loop(self):
+        while True:
+            try:
+                await self.refresh_subs()
+            except Exception as e:
+                print(f"[subs] {e}")
+            await asyncio.sleep(int(os.getenv("SUBS_PERIOD", "21600")))
+
+    async def refresh_subs(self):
+        for username in self.store.active_usernames():
+            try:
+                ent = self._entity(username) if username in self._ents \
+                    else await self.client.get_entity(username)
+                self._ents[username] = ent
+                full = await self.client(functions.channels.GetFullChannelRequest(ent))
+                n = full.full_chat.participants_count or 0
+                if n:
+                    self.store.set_subs(username, n)
+            except Exception as e:
+                print(f"[subs] {username}: {e}")
+        print("[subs] аудитория каналов обновлена")
 
     # ---------- утилиты ----------
     async def cleanup_loop(self):
