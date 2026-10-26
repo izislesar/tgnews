@@ -42,12 +42,34 @@ CARD = InlineKeyboardMarkup(inline_keyboard=[
 
 
 def fmt_html(text: str) -> str:
-    s = html.escape(text, quote=False)
-    s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s, flags=re.S)
-    s = re.sub(r"(?<![/\"'>])\b(https?://[^\s<]+)", r'<a href="\1">\1</a>', s)
-    if s.count("<b>") != s.count("</b>"):
-        s = re.sub(r"</?b>", "", s)
-    return s
+    """Разметка модели -> Telegram HTML:
+    **жирный** -> <b>, голые URL -> <a>, строки '>> ' -> цитата (blockquote).
+    Длинные цитаты (>200 симв.) делают expandable — сворачиваются на клиенте."""
+    out = []
+    qbuf = []
+
+    def flush_q():
+        if not qbuf:
+            return
+        inner = "\n".join(qbuf)
+        qbuf.clear()
+        tag = "blockquote expandable" if len(inner) > 200 else "blockquote"
+        out.append(f"<{tag}>{html.escape(inner, quote=False)}</{tag}>")
+
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith(">>"):
+            qbuf.append(stripped[2:].strip())
+            continue
+        flush_q()
+        s = html.escape(line, quote=False)
+        s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s, flags=re.S)
+        s = re.sub(r"(?<![/\"'>])\b(https?://[^\s<]+)", r'<a href="\1">\1</a>', s)
+        if s.count("<b>") != s.count("</b>"):
+            s = re.sub(r"</?b>", "", s)
+        out.append(s)
+    flush_q()
+    return "\n".join(out)
 
 
 class AdminBot:
