@@ -251,13 +251,11 @@ class AdminBot:
                 await asyncio.sleep(1)
 
         delivered = 0
-        for qid, username, ids, key, text, views, reactions, ts, has_media in cands:
+        results = await llm.translate_many([c[4] for c in cands])
+        for (qid, username, ids, key, text, views, reactions, ts, has_media), out in zip(cands, results):
             if delivered >= n:
                 break
-            try:
-                out = await llm.translate(text)
-            except Exception as e:
-                print(f"[llm fail {qid}] {e} — пост остаётся в бэклоге")
+            if out is False:  # LLM-сбой — пост остаётся в бэклоге
                 continue
             if out is None:  # SKIP (реклама/не-новость)
                 self.store.mark_dead(qid)
@@ -372,9 +370,12 @@ class AdminBot:
     async def cmd_stats(self, message: Message, command: CommandObject, admin_id: int | None = None):
         from .store import WINDOW_H
         s = self.store.stats()
+        u = llm.USAGE
         lines = [
             f"В окне ({int(WINDOW_H)}ч): {s.get('backlog_window', 0)} новых",
             f"Всего: new={s.get('new', 0)} dead={s.get('dead', 0)} dup={s.get('dup', 0)}",
+            f"LLM: {u['calls']} вызовов, in={u['in']} out={u['out']} cached={u['cached']} "
+            f"(режим {llm.MODE})",
             "",
             "Источники (7 дней): всего / скип / дубли / выдано / в отбор",
         ]
