@@ -1,0 +1,27 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+    paths: ["app/**", "prompt.txt", "channels.txt", "docker-compose.yml", "Dockerfile"]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: root
+          key: ${{ secrets.SSH_KEY }}
+          script_stop: true
+          script: |
+            cd /root/tgnews
+            git fetch origin main
+            git reset --hard origin/main
+            docker compose build
+            docker compose up -d --force-recreate
+            sleep 20
+            docker compose logs --since 1m | tail -20

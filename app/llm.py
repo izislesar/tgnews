@@ -16,7 +16,11 @@ import uuid
 
 import aiohttp
 
-SYSTEM = open("/app/prompt.txt", encoding="utf-8").read()
+_PROMPT = os.environ.get("LLM_PROMPT_PATH", "/app/prompt.txt")
+if not os.path.exists(_PROMPT):  # запуск вне контейнера (тесты/локально)
+    _PROMPT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "prompt.txt")
+SYSTEM = open(_PROMPT, encoding="utf-8").read()
 
 BASE = os.environ.get("OPENCODE_BASE", "https://opencode.ai/inference/go/v1")
 MODEL = os.environ.get("OPENCODE_MODEL", "muse-spark-1.3-contributor")

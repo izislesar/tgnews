@@ -233,7 +233,8 @@ class AdminBot:
             await message.answer("Новых постов нет (окно 48 часов).")
             return
 
-        # обеспечиваем file_id для медиа-постов (кэш или через юзербот)
+        # перевод и ожидание медиарелея — параллельно
+        translate_task = asyncio.create_task(llm.translate_many([c[4] for c in cands]))
         created = []
         for qid, username, ids, key, text, views, reactions, ts, has_media in cands:
             if not has_media:
@@ -251,7 +252,7 @@ class AdminBot:
                 await asyncio.sleep(1)
 
         delivered = 0
-        results = await llm.translate_many([c[4] for c in cands])
+        results = await translate_task
         for (qid, username, ids, key, text, views, reactions, ts, has_media), out in zip(cands, results):
             if delivered >= n:
                 break
@@ -285,22 +286,12 @@ class AdminBot:
             sent.append(await self.bot.send_message(chat_id, body_html, parse_mode="HTML",
                                                     reply_markup=markup))
         else:
-            caption = body_html if len(body_html) <= 1024 else None
-            if len(items) == 1:
-                it = items[0]
-                kwargs = {"caption": caption, "parse_mode": "HTML"} if caption else {}
-                sent.append(await getattr(self.bot, SENDERS[it["kind"]])(chat_id, it["id"],
-                                                                          reply_markup=markup, **kwargs))
-            else:
-                media = []
-                for i, it in enumerate(items):
-                    if i == 0 and caption:
-                        media.append(KIND_MAP[it["kind"]](media=it["id"], caption=caption, parse_mode="HTML"))
-                    else:
-                        media.append(KIND_MAP[it["kind"]](media=it["id"]))
-                sent += await self.bot.send_media_group(chat_id, media=media)
-            if caption is None:
-                sent.append(await self.bot.send_message(chat_id, body_html, parse_mode="HTML"))
+            # альбом: карточку к media group не прикрепить (Bot API) — шлём альбом
+            # без подписи, а текст + карточку следом отдельным сообщением
+            media = [KIND_MAP[it["kind"]](media=it["id"]) for it in items]
+            sent += await self.bot.send_media_group(chat_id, media=media)
+            sent.append(await self.bot.send_message(chat_id, body_html, parse_mode="HTML",
+                                                    reply_markup=markup))
         if qid:
             for m in sent:
                 self.store.map_card(chat_id, m.message_id, qid)
