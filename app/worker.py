@@ -7,6 +7,22 @@ import time
 
 from telethon import TelegramClient, events, functions, types, utils
 
+# Чёрный список СВЕЖЕСТЕЙ (валидирован по JSON-экспорту канала): спорт-результаты,
+# реклама/промо, лайфстайл. Крипта и знаменитости-ньюсмейкеры ПУБЛИКУЮТСЯ — не трогать.
+import re
+
+BLACKLIST = [
+    # спорт-результаты
+    r"со счетом \d", r"чемпионат\w* мира", r"лиг\w* чемпионов", r"\bфифа\b", r"\bуефа\b",
+    r"футбольн\w* матч",
+    # реклама/промо
+    r"промо-?код", r"подписк\w+ со скидкой", r"купить со скидкой", r"реферальн\w*",
+    r"переходи (?:по ссылке|в)", r"не пропустите",
+    # лайфстайл
+    r"гороскоп", r"знак\w* зодиака", r"рецепт\w* приготовлени", r"дегустаци\w* вин",
+]
+BLACK_RE = re.compile("|".join(BLACKLIST), re.IGNORECASE)
+
 
 def _rid() -> int:
     return int.from_bytes(os.urandom(8), "big") >> 1  # знаковый int64
@@ -138,6 +154,8 @@ class Worker:
         text = next((m.raw_text for m in msgs if m.raw_text), "")
         if not text.strip():
             return  # медиа без текста не переводим
+        if BLACK_RE.search(text):
+            return  # чёрный список СВЕЖЕСТЕЙ (спорт-результаты/реклама/лайфстайл)
         reactions = 0
         if m0.reactions:
             reactions = sum(rc.count for rc in m0.reactions.results)
