@@ -115,7 +115,7 @@ docker compose logs -f
 | `APPROVAL_CHAT_ID` | из `/set_approval_chat` | чат отбора (можно не задавать) |
 | `API_ID` / `API_HASH` | ключи Telegram Desktop | можно не задавать |
 | `SESSION_PATH` | `/data/session` | файл сессии юзербота |
-| `GET_N` / `GET_MAX` | `5` / `20` |постов по /get по умолчанию и потолок |
+| `GET_N` / `GET_MAX` | `5` / `20` | постов по /get по умолчанию и потолок |
 | `GET_CANDIDATES` | `15` | размер шорт-листа для перевода |
 | `WINDOW_H` | `24` | окно отбора /get, часов |
 | `DEDUP_WINDOW_H` | `= WINDOW_H` | окно дедупа, часов (независимое) |
