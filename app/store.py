@@ -7,6 +7,7 @@ import time
 
 DEDUP_JACCARD = float(os.getenv("DEDUP_JACCARD", "0.6"))
 WINDOW_H = float(os.getenv("WINDOW_H", "24"))        # окно отбора для /get, часов
+DEDUP_WINDOW_H = float(os.getenv("DEDUP_WINDOW_H", str(WINDOW_H)))  # окно дедупа, часов
 FRESH_HALF = float(os.getenv("FRESH_HALF", "12"))    # полураспад свежести, часов
 ERATE_W = float(os.getenv("ERATE_W", "10"))          # вес engagement rate
 VRATE_EXP = float(os.getenv("VRATE_EXP", "0.5"))     # степень нормир. просмотров
@@ -134,9 +135,9 @@ class Store:
 
     # ---------- посты ----------
     def upsert_post(self, src_bare, username, ids, key, text, views, reactions, has_media):
-        """Вставка с бесплатным дедупом: Jaccard-фингерпринт против постов за WINDOW_H часов."""
+        """Вставка с бесплатным дедупом: Jaccard-фингерпринт против постов за DEDUP_WINDOW_H часов."""
         toks = _tokens(text or "")
-        cutoff = time.time() - WINDOW_H * 3600
+        cutoff = time.time() - DEDUP_WINDOW_H * 3600
         recent = self.con.execute(
             "SELECT text FROM posts WHERE ts>? AND state IN ('new')", (cutoff,)).fetchall()
         for (rt,) in recent:
@@ -162,7 +163,7 @@ class Store:
 
     def fresh_ids_by_channel(self, max_age_h=None):
         """Сгруппированные по username ids новых постов в окне — для рефреша метрик."""
-        cutoff = time.time() - (max_age_h or WINDOW_H) * 3600
+        cutoff = time.time() - (max_age_h or max(WINDOW_H, 2)) * 3600
         out = {}
         for u, ids in self.con.execute(
                 "SELECT username, ids FROM posts WHERE state='new' AND ts>? ORDER BY ts DESC",
