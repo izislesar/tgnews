@@ -15,7 +15,7 @@ from telethon import functions
 from . import llm
 
 DEFAULT_N = int(os.getenv("GET_N", "5"))
-MAX_N = int(os.getenv("GET_MAX", "10"))
+MAX_N = int(os.getenv("GET_MAX", "20"))
 CANDIDATES = int(os.getenv("GET_CANDIDATES", "15"))
 MEDIA_WAIT_S = int(os.getenv("MEDIA_WAIT_S", "120"))
 LINK_GAP = int(os.getenv("LINK_GAP", "5"))  # пустых строк между постом и ссылкой на источник
