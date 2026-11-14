@@ -53,7 +53,8 @@ def fmt_html(text: str) -> str:
         inner = "\n".join(qbuf)
         qbuf.clear()
         tag = "blockquote expandable" if len(inner) > 200 else "blockquote"
-        out.append(f"<{tag}>{html.escape(inner, quote=False)}</{tag}>")
+        # закрывающий тег БЕЗ атрибута: </blockquote expandable> Telegram не парсит
+        out.append(f"<{tag}>{html.escape(inner, quote=False)}</blockquote>")
 
     for line in text.split("\n"):
         stripped = line.strip()
