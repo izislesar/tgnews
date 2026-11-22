@@ -115,12 +115,17 @@ class SearxngSearch:
             return hits
         if not data.get("unresponsive_engines"):
             return []  # движки живы, просто ничего не нашли
+        unresponsive = data.get("unresponsive_engines")
         for engine in self.fallback_engines:
             data = await self._get({**parent, "engines": engine})
             hits = self._parse(data)
             if hits:
                 return hits
-        raise SearchError(f"все движки недоступны: {data.get('unresponsive_engines')}")
+            if not data.get("unresponsive_engines"):
+                # резервный движок ответил — значит это честное «ничего не найдено»,
+                # а не сбой инфраструктуры (иначе посты ложно уйдут в degraded)
+                return []
+        raise SearchError(f"все движки недоступны: {unresponsive}")
 
     def _parse(self, data: dict) -> list[Hit]:
         unresponsive = data.get("unresponsive_engines") or []

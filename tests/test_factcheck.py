@@ -952,3 +952,21 @@ def test_corrected_text_strips_service_markers():
     verdict = PostVerdict(claims=[_refuted_verdict(("reuters.com",))])
     result = asyncio.run(corrector.correct("Погибли 29 человек.", verdict))
     assert result.text == "Погибли 12 человек (по данным Reuters)."
+
+
+def test_search_empty_from_fallback_is_not_an_outage():
+    from app.factcheck.searxng import SearxngSearch
+    from app.factcheck.models import Query
+
+    client = SearxngSearch("http://searx:8080", fallback_engines="bing")
+    calls = []
+
+    async def fake_get(params):
+        calls.append(params)
+        if "engines" not in params:
+            return {"results": [], "unresponsive_engines": [["google cse", "Suspended"]]}
+        return {"results": [], "unresponsive_engines": []}  # bing ответил, пусто
+
+    client._get = fake_get
+    assert asyncio.run(client.search(Query(text="x"))) == []  # не исключение
+    assert len(calls) == 2
