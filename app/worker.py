@@ -29,8 +29,11 @@ def _rid() -> int:
 
 
 class Worker:
-    def __init__(self, store, session_path, api_id, api_hash, bot_username):
+    def __init__(self, store, session_path, api_id, api_hash, bot_username,
+                 fc_repo=None, fc_mode="off"):
         self.store = store
+        self.fc_repo = fc_repo
+        self.fc_mode = (fc_mode or "off").lower()
         self.bot_username = bot_username
         self.client = TelegramClient(session_path, api_id, api_hash)
         self.user_id = None
@@ -166,6 +169,10 @@ class Worker:
             return
         self.store.upsert_post(chat.id, username, ids, key, text, views, reactions,
                                has_media=any(m.photo or m.document for m in msgs))
+        if self.fc_repo is not None and self.fc_mode != "off":
+            qid = self.store.qid_by_key(key)
+            if qid:
+                self.fc_repo.enqueue(qid, "t1")
 
     async def on_message(self, event):
         m = event.message

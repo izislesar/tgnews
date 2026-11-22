@@ -1,0 +1,621 @@
+"""Тесты фактчекинга: без сети и без LLM — только фейки портов."""
+
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from app.factcheck import policy
+from app.factcheck.claims import ClaimExtractor, heuristic_claims
+from app.factcheck.fetch import _is_private_ip, extract_document, select_snippets
+from app.factcheck.judge import LlmJudge
+from app.factcheck.models import (
+    Claim,
+    ClaimType,
+    ClaimVerdict,
+    Document,
+    Evidence,
+    Hit,
+    PostVerdict,
+    Priority,
+    Snippet,
+    Status,
+)
+from app.factcheck.query import build_initial, refine
+from app.factcheck.service import FactCheckService
+from app.settings import Settings
+
+
+# ---------- фейки ----------
+class FakePrompts:
+    def get(self, name: str) -> str:
+        return f"prompt:{name}"
+
+    def version(self) -> str:
+        return "test"
+
+
+class FakeLlm:
+    def __init__(self, payload=None, error: Exception | None = None):
+        self.payload = payload or {}
+        self.error = error
+        self.calls = 0
+
+    async def json(self, **kwargs):
+        self.calls += 1
+        if self.error:
+            raise self.error
+        return self.payload
+
+
+class FakeSearch:
+    def __init__(self, hits):
+        # либо один список, либо список списков (по вызову на цикл)
+        if hits and isinstance(hits[0], list):
+            self.batches = list(hits)
+        else:
+            self.batches = [list(hits)]
+        self.queries = []
+
+    async def search(self, query):
+        self.queries.append(query.text)
+        batch = self.batches.pop(0) if len(self.batches) > 1 else self.batches[0]
+        return list(batch)
+
+    async def close(self):
+        pass
+
+
+class FakeFetch:
+    def __init__(self, docs):
+        self.docs = docs
+        self.urls = []
+
+    async def fetch(self, url):
+        self.urls.append(url)
+        return self.docs.get(url)
+
+    async def close(self):
+        pass
+
+
+class FailingSearch:
+    async def search(self, query):
+        raise RuntimeError("SearXNG недоступен")
+
+    async def close(self):
+        pass
+
+
+class FakeJudge:
+    def __init__(self, verdicts):
+        self.verdicts = list(verdicts)
+        self.calls = 0
+        self.post_dates = []
+
+    async def judge(self, claim, snippets, *, cycle=1, post_date=None):
+        self.post_dates.append(post_date)
+        self.calls += 1
+        if self.verdicts:
+            return self.verdicts.pop(0)
+        return ClaimVerdict(claim=claim, status=Status.NOT_FOUND, cycles=cycle)
+
+
+def make_settings(**overrides) -> Settings:
+    base = dict(llm_key="test", fc_calls_per_post=6, fc_deadline_s=30.0,
+                fc_judge_concurrency=2, fc_top_hits=2, fc_snippets_per_claim=2,
+                fc_max_claims=4, fc_cycles=2)
+    base.update(overrides)
+    return Settings(**base)
+
+
+def core_claim(text="Дроновые атаки почти вдвое снизили нефтепереработку в России",
+               ctype=ClaimType.NUMERIC, numbers=("2026",)) -> Claim:
+    return Claim(idx=0, text=text, ctype=ctype, priority=Priority.CORE,
+                 numbers=list(numbers), entities=["Россия"])
+
+
+def evidence_for(domain: str) -> Evidence:
+    return Evidence(url=f"https://{domain}/a", domain=domain,
+                    publisher_group=policy.publisher_group(domain))
+
+
+# ---------- claims ----------
+def test_claim_key_stable_across_punctuation_and_order():
+    a = Claim(idx=0, text="Удар БПЛА по НПЗ в Рязани!", ctype=ClaimType.EVENT)
+    b = Claim(idx=7, text="удар бпла по нпз в рязани", ctype=ClaimType.EVENT)
+    c = Claim(idx=0, text="Удар БПЛА по НПЗ в Рязани!", ctype=ClaimType.NUMERIC)
+    assert a.claim_key == b.claim_key
+    assert a.claim_key != c.claim_key
+
+
+def test_heuristic_claims_marks_numbers_as_core():
+    claims = heuristic_claims(
+        "Ночью дроны атаковали нефтеперерабатывающий завод в Рязани. "
+        "Погибли 29 человек, ещё 12 пострадали. Власти обещают помощь."
+    )
+    assert claims, "эвристика должна что-то найти"
+    assert any(c.is_core and c.ctype is ClaimType.NUMERIC for c in claims)
+
+
+def test_extractor_falls_back_to_heuristic_when_llm_fails():
+    llm = FakeLlm(error=RuntimeError("down"))
+    extractor = ClaimExtractor(llm, FakePrompts(), max_claims=3)
+    claims = asyncio.run(extractor.extract("Погибли 29 человек при ударе по заводу в Рязани."))
+    assert claims and claims[0].is_core
+
+
+def test_extractor_parses_and_dedupes_llm_payload():
+    payload = {"claims": [
+        {"text": "Погибли 29 человек при ударе по заводу", "ctype": "numeric",
+         "priority": "core", "entities": ["Рязань"], "numbers": ["29"], "lang": "ru"},
+        {"text": "погибли 29 человек при ударе по заводу!", "ctype": "numeric",
+         "priority": "core", "entities": [], "numbers": [], "lang": "ru"},
+        {"text": "Это было позорное решение властей", "ctype": "opinion", "priority": "core",
+         "entities": [], "numbers": [], "lang": "ru"},
+    ]}
+    extractor = ClaimExtractor(FakeLlm(payload), FakePrompts(), max_claims=5)
+    claims = asyncio.run(extractor.extract("текст"))
+    assert len(claims) == 2
+    opinion = [c for c in claims if c.ctype is ClaimType.OPINION][0]
+    assert opinion.is_core is False  # мнение всегда secondary, даже если модель ошиблась
+
+
+# ---------- политика ----------
+def test_supported_needs_two_independent_groups():
+    claim = core_claim()
+    one = ClaimVerdict(claim=claim, status=Status.SUPPORTED, confidence=0.95,
+                       evidence=[evidence_for("bbc.com")])
+    two = ClaimVerdict(claim=claim, status=Status.SUPPORTED, confidence=0.95,
+                       evidence=[evidence_for("bbc.com"), evidence_for("meduza.io")])
+    assert policy.confirmation_ok(one) is False
+    assert policy.effective_status(one) is Status.PARTIAL
+    assert policy.confirmation_ok(two) is True
+    assert policy.effective_status(two) is Status.SUPPORTED
+
+
+def test_same_publisher_group_is_not_independent():
+    claim = core_claim()
+    verdict = ClaimVerdict(claim=claim, status=Status.SUPPORTED, confidence=0.9,
+                           evidence=[evidence_for("ria.ru"), evidence_for("tass.ru")])
+    assert policy.confirmation_ok(verdict) is False
+
+
+def test_attributed_claim_needs_only_primary_source():
+    claim = core_claim("Минобороны заявило об уничтожении 12 дронов",
+                       ctype=ClaimType.ATTRIBUTED, numbers=("12",))
+    verdict = ClaimVerdict(claim=claim, status=Status.SUPPORTED, confidence=0.8,
+                           evidence=[evidence_for("mil.ru")])
+    assert policy.confirmation_ok(verdict) is True
+
+
+def test_aggregate_takes_worst_core_status():
+    ok = ClaimVerdict(claim=core_claim("А"), status=Status.SUPPORTED, confidence=0.9,
+                      evidence=[evidence_for("reuters.com"), evidence_for("bbc.com")])
+    bad = ClaimVerdict(claim=core_claim("Б"), status=Status.REFUTED, confidence=0.9)
+    assert policy.aggregate([ok, bad]) is Status.REFUTED
+    assert policy.aggregate([ok]) is Status.SUPPORTED
+    assert policy.aggregate([]) is Status.SKIPPED
+
+
+# ---------- дисклеймер ----------
+def test_disclaimer_only_for_core_claims():
+    core_bad = ClaimVerdict(claim=core_claim("Погибли 29 человек"),
+                            status=Status.NOT_FOUND)
+    secondary_bad = ClaimVerdict(
+        claim=Claim(idx=1, text="подробности", ctype=ClaimType.EVENT,
+                    priority=Priority.SECONDARY),
+        status=Status.NOT_FOUND)
+    verdict = PostVerdict(status=Status.NOT_FOUND, claims=[core_bad, secondary_bad])
+    text = verdict.disclaimer
+    assert text and "не подтверждено" in text.lower()
+    assert "Погибли 29 человек" in text
+    assert "подробности" not in text
+
+
+def test_disclaimer_none_when_all_core_supported():
+    claim = core_claim()
+    verdict = PostVerdict(status=Status.SUPPORTED, claims=[
+        ClaimVerdict(claim=claim, status=Status.SUPPORTED, confidence=0.9,
+                     evidence=[evidence_for("reuters.com"), evidence_for("bbc.com")])
+    ])
+    assert verdict.disclaimer is None
+
+
+def test_disclaimer_refuted_wording():
+    verdict = PostVerdict(status=Status.REFUTED, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 300 человек"), status=Status.REFUTED,
+                     confidence=0.95)
+    ])
+    assert "опровергают" in (verdict.disclaimer or "")
+
+
+# ---------- судья ----------
+def test_judge_drops_invented_evidence_indices():
+    payload = {"status": "supported", "confidence": 0.9, "used": [7], "note": "ok"}
+    judge = LlmJudge(FakeLlm(payload), FakePrompts())
+    snippets = [Snippet(url="https://reuters.com/a", domain="reuters.com", quote="text")]
+    verdict = asyncio.run(judge.judge(core_claim(), snippets))
+    assert verdict.status is Status.NOT_FOUND  # без валидного evidence поддержка не считается
+    assert verdict.evidence == []
+
+
+def test_judge_attaches_evidence_and_group():
+    payload = {"status": "supported", "confidence": 0.9, "used": [0], "note": "ok"}
+    judge = LlmJudge(FakeLlm(payload), FakePrompts())
+    snippets = [Snippet(url="https://reuters.com/a", domain="reuters.com", quote="text")]
+    verdict = asyncio.run(judge.judge(core_claim(), snippets))
+    assert verdict.status is Status.SUPPORTED
+    assert verdict.evidence[0].publisher_group == "agencies-west"
+
+
+def test_judge_low_confidence_refutation_becomes_contested():
+    payload = {"status": "refuted", "confidence": 0.3, "used": [], "note": "?"}
+    judge = LlmJudge(FakeLlm(payload), FakePrompts())
+    snippets = [Snippet(url="https://reuters.com/a", domain="reuters.com", quote="text")]
+    assert asyncio.run(judge.judge(core_claim(), snippets)).status is Status.CONTESTED
+
+
+# ---------- fetch ----------
+def test_private_ips_are_blocked():
+    assert _is_private_ip("127.0.0.1")
+    assert _is_private_ip("10.0.0.5")
+    assert _is_private_ip("169.254.169.254")
+    assert not _is_private_ip("8.8.8.8")
+
+
+def test_extract_document_uses_paragraph_fallback():
+    html = ("<html><head><title>T</title>"
+            "<meta property='og:description' content='Краткое описание'>"
+            "</head><body>" + "<p>Абзац с фактами и числами 29 человек.</p>" * 6 +
+            "</body></html>").encode()
+    doc = extract_document("https://example.com/a", html, min_text=200)
+    assert doc and "29 человек" in doc.text
+
+
+def test_select_snippets_prioritises_claim_terms():
+    doc = Document(url="https://example.com/a", text=(
+        "Погода сегодня хорошая. " * 5 +
+        "Дроновые атаки почти вдвое снизили нефтепереработку в России в ноябре. "
+        + "Спорт и культура. " * 5))
+    snippets = select_snippets(doc, core_claim(), k=2)
+    assert snippets and any("нефтепереработку" in s.quote for s in snippets)
+
+
+# ---------- запросы ----------
+def test_initial_queries_use_entities_and_numbers():
+    queries = build_initial(core_claim())
+    assert queries and "Россия" in queries[0].text
+    assert len(queries) <= 3
+
+
+def test_refine_adds_denial_query():
+    claim = core_claim("Минобороны опровергло уничтожение 12 дронов",
+                       ctype=ClaimType.ATTRIBUTED, numbers=("12",))
+    verdict = ClaimVerdict(claim=claim, status=Status.NOT_FOUND, note="не нашли")
+    queries = refine(claim, verdict, cycle=1)
+    assert any("опроверг" in q.text for q in queries)
+
+
+# ---------- сервис (циклы) ----------
+def _service(settings, claim_payload, hits, docs, judge):
+    extractor = ClaimExtractor(FakeLlm(claim_payload), FakePrompts(), max_claims=3)
+    return FactCheckService(
+        settings=settings,
+        repo=None,
+        search=FakeSearch(hits),
+        fetcher=FakeFetch(docs),
+        judge=judge,
+        extractor=extractor,
+        prompts=FakePrompts(),
+    )
+
+
+CLAIM_PAYLOAD = {"claims": [{
+    "text": "Дроновые атаки почти вдвое снизили нефтепереработку в России",
+    "ctype": "event", "priority": "core", "entities": ["Россия"],
+    "numbers": [], "lang": "en"}]}
+HITS = [Hit(url="https://www.reuters.com/a", title="R"), Hit(url="https://www.bbc.com/b", title="B")]
+DOCS = {
+    "https://www.reuters.com/a": Document(
+        url="https://www.reuters.com/a",
+        text="Drone attacks nearly halved Russia's November oil refining, sources said."),
+    "https://www.bbc.com/b": Document(
+        url="https://www.bbc.com/b",
+        text="Drone strikes have nearly halved Russia's oil refining capacity this month."),
+}
+
+
+HITS2 = [Hit(url="https://apnews.com/c", title="AP"),
+         Hit(url="https://www.theguardian.com/d", title="G")]
+DOCS2 = {
+    "https://apnews.com/c": Document(
+        url="https://apnews.com/c",
+        text="Drone attacks nearly halved Russia's refining capacity in November."),
+    "https://www.theguardian.com/d": Document(
+        url="https://www.theguardian.com/d",
+        text="Ukrainian drones have nearly halved Russian oil refining this month."),
+}
+
+
+def test_service_stops_after_confirmation():
+    claim = core_claim("Дроновые атаки почти вдвое снизили нефтепереработку в России",
+                       ctype=ClaimType.EVENT, numbers=())
+    judge = FakeJudge([ClaimVerdict(
+        claim=claim, status=Status.SUPPORTED, confidence=0.92,
+        evidence=[evidence_for("reuters.com"), evidence_for("bbc.com")])])
+    service = _service(make_settings(), CLAIM_PAYLOAD, HITS, DOCS, judge)
+    verdict = asyncio.run(service.check_text("текст", tier="t2"))
+    assert verdict.status is Status.SUPPORTED
+    assert judge.calls == 1  # ранний выход, второй цикл не нужен
+    assert verdict.disclaimer is None
+
+
+def test_service_runs_second_cycle_when_not_found():
+    claim = core_claim("Дроновые атаки почти вдвое снизили нефтепереработку в России",
+                       ctype=ClaimType.EVENT, numbers=())
+    judge = FakeJudge([
+        ClaimVerdict(claim=claim, status=Status.NOT_FOUND, note="мало данных"),
+        ClaimVerdict(claim=claim, status=Status.SUPPORTED, confidence=0.9,
+                     evidence=[evidence_for("reuters.com"), evidence_for("bbc.com")]),
+    ])
+    service = _service(make_settings(), CLAIM_PAYLOAD, [HITS, HITS2], {**DOCS, **DOCS2}, judge)
+    verdict = asyncio.run(service.check_text("текст", tier="t2"))
+    assert judge.calls == 2
+    assert verdict.status is Status.SUPPORTED
+
+
+def test_service_degrades_on_budget():
+    settings = make_settings(fc_calls_per_post=1)
+    judge = FakeJudge([])
+    service = _service(settings, CLAIM_PAYLOAD, HITS, DOCS, judge)
+    verdict = asyncio.run(service.check_text("текст", tier="t1"))
+    assert judge.calls == 0
+    assert verdict.claims[0].error and "бюджет" in verdict.claims[0].error
+
+
+def test_service_respects_deadline():
+    settings = make_settings(fc_deadline_s=0.0)
+    judge = FakeJudge([])
+    service = _service(settings, CLAIM_PAYLOAD, HITS, DOCS, judge)
+    verdict = asyncio.run(service.check_text("текст", tier="t2"))
+    assert judge.calls == 0
+    assert verdict.status is Status.NOT_FOUND
+
+
+def test_service_passes_post_date_to_judge():
+    claim = core_claim("Дроновые атаки почти вдвое снизили нефтепереработку в России",
+                       ctype=ClaimType.EVENT, numbers=())
+    judge = FakeJudge([ClaimVerdict(claim=claim, status=Status.NOT_FOUND)])
+    service = _service(make_settings(), CLAIM_PAYLOAD, HITS, DOCS, judge)
+    import time as _time
+    asyncio.run(service.check_text("текст", tier="t1", post_ts=_time.time() - 3600))
+    assert judge.post_dates and judge.post_dates[0]
+
+
+def test_service_marks_degraded_when_search_is_down():
+    settings = make_settings()
+    extractor = ClaimExtractor(FakeLlm(CLAIM_PAYLOAD), FakePrompts(), max_claims=3)
+    judge = FakeJudge([])
+    service = FactCheckService(
+        settings=settings, repo=None, search=FailingSearch(),
+        fetcher=FakeFetch(DOCS), judge=judge, extractor=extractor, prompts=FakePrompts())
+    verdict = asyncio.run(service.check_text("текст", tier="t1"))
+    assert verdict.degraded is True
+    assert judge.calls == 0
+    assert verdict.disclaimer is None  # «не проверили» != «не подтверждено»
+    assert "поиск недоступен" in (verdict.claims[0].error or "")
+
+
+def test_service_skips_when_no_core_claims():
+    payload = {"claims": [{"text": "Это была прекрасная речь", "ctype": "opinion",
+                           "priority": "secondary", "entities": [], "numbers": [],
+                           "lang": "ru"}]}
+    service = _service(make_settings(), payload, HITS, DOCS, FakeJudge([]))
+    verdict = asyncio.run(service.check_text("текст"))
+    assert verdict.status is Status.SKIPPED
+    assert verdict.disclaimer is None
+
+
+# ---------- конфиг ----------
+def test_settings_load_from_env_file(tmp_path, monkeypatch):
+    for name in ("OPENCODE_MODEL", "FC_CYCLES", "SEARX_URL", "FC_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    env = tmp_path / ".env"
+    env.write_text("OPENCODE_MODEL=test-model\nFC_CYCLES=3\n"
+                   "SEARX_URL=http://searx:8080\nFC_ENABLED=shadow\n", encoding="utf-8")
+    settings = Settings.load(env)
+    assert settings.model == "test-model"
+    assert settings.fc_cycles == 3
+    assert settings.searx_url == "http://searx:8080"
+    assert settings.fc_mode == "shadow"
+
+
+def test_single_agency_report_is_enough():
+    claim = core_claim()
+    verdict = ClaimVerdict(claim=claim, status=Status.SUPPORTED, confidence=0.9,
+                           evidence=[evidence_for("reuters.com")])
+    assert policy.confirmation_ok(verdict) is True
+
+
+def test_lead_paragraph_always_in_snippets():
+    doc = Document(url="https://example.com/a", text=(
+        "Минобороны сообщило о четырёхсторонней встрече в Тегеране. "
+        "Подробности позже. " + "Погода и спорт. " * 10))
+    snippets = select_snippets(doc, core_claim("Иран провёл встречу с Пакистаном"),
+                               k=1)
+    assert snippets and "Тегеране" in snippets[0].quote
+
+
+def test_unknown_domains_do_not_confirm():
+    claim = core_claim()
+    verdict = ClaimVerdict(claim=claim, status=Status.SUPPORTED, confidence=0.95,
+                           evidence=[evidence_for("random-blog.example"),
+                                     evidence_for("another.example")])
+    assert policy.publisher_group("random-blog.example") == "other"
+    assert policy.confirmation_ok(verdict) is False
+
+
+# ---------- хранилище ----------
+def test_repo_saves_and_loads_verdict(tmp_path):
+    import sqlite3
+    from app.factcheck.repo import FactcheckRepo
+
+    con = sqlite3.connect(tmp_path / "t.db")
+    con.execute("CREATE TABLE posts(qid INTEGER PRIMARY KEY, text TEXT, ts REAL)")
+    con.execute("INSERT INTO posts(qid, text, ts) VALUES(1, 'текст', 1000.0)")
+    repo = FactcheckRepo(con)
+
+    verdict = PostVerdict(status=Status.NOT_FOUND, qid=1, claims=[
+        ClaimVerdict(claim=core_claim(), status=Status.NOT_FOUND,
+                     evidence=[evidence_for("reuters.com")])])
+    repo.save(1, verdict, version="v1")
+
+    loaded = repo.load(1)
+    assert loaded is not None
+    assert loaded.status is Status.NOT_FOUND
+    assert loaded.claims[0].evidence[0].domain == "reuters.com"
+    assert loaded.claims[0].claim.claim_key == core_claim().claim_key
+
+    repo.enqueue(1)
+    assert repo.claim_next() == 1
+    repo.fail(1, "сбой")
+    assert repo.pending() == 1
+    repo.finish(1)
+    assert repo.pending() == 0
+
+
+# ---------- клиент поиска ----------
+def test_search_caches_repeated_queries():
+    from app.factcheck.searxng import SearxngSearch
+    from app.factcheck.models import Query
+
+    client = SearxngSearch("http://searx:8080")
+    calls = []
+
+    async def fake_get(params):
+        calls.append(dict(params))
+        return {"results": [{"url": "https://www.reuters.com/a", "title": "t",
+                             "content": "c", "engine": "bing", "score": 1.0}],
+                "unresponsive_engines": []}
+
+    client._get = fake_get
+    first = asyncio.run(client.search(Query(text="x", language="en")))
+    second = asyncio.run(client.search(Query(text="x", language="en")))
+    assert len(first) == len(second) == 1
+    assert len(calls) == 1  # второй запрос обслужен кэшем
+
+
+def test_search_raises_when_all_engines_down():
+    from app.factcheck.searxng import SearxngSearch, SearchError
+    from app.factcheck.models import Query
+
+    client = SearxngSearch("http://searx:8080", fallback_engines="bing,brave")
+
+    async def fake_get(params):
+        return {"results": [], "unresponsive_engines": [["google cse", "Suspended"]]}
+
+    client._get = fake_get
+    with pytest.raises(SearchError):
+        asyncio.run(client.search(Query(text="x")))
+
+
+def test_search_returns_empty_when_engines_are_alive():
+    from app.factcheck.searxng import SearxngSearch
+    from app.factcheck.models import Query
+
+    client = SearxngSearch("http://searx:8080")
+
+    async def fake_get(params):
+        return {"results": [], "unresponsive_engines": []}
+
+    client._get = fake_get
+    assert asyncio.run(client.search(Query(text="x"))) == []
+
+
+# ---------- интеграция в бота ----------
+def _stub_bot(settings=None):
+    from app.bot import AdminBot
+    from app.store import Store
+
+    settings = settings or Settings(bot_token="123456789:AA" + "x" * 33, fc_mode="on")
+    store = Store(":memory:")
+    return AdminBot(store, None, {1}, settings=settings), store
+
+
+def test_body_appends_disclaimer():
+    bot, _store = _stub_bot()
+    post = {"ru_text": "✅ **Текст поста**", "username": "ch", "ids": "10"}
+    assert "не подтверждено" not in bot._body(post, None).lower()
+
+    verdict = PostVerdict(status=Status.NOT_FOUND, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND)])
+    body = bot._body(post, verdict)
+    assert "t.me/ch/10" in body
+    assert "не подтверждено" in body.lower()
+
+
+def test_verdict_text_contains_evidence_and_status():
+    bot, _store = _stub_bot()
+    verdict = PostVerdict(qid=7, status=Status.SUPPORTED, claims=[
+        ClaimVerdict(claim=core_claim(), status=Status.SUPPORTED, confidence=0.9,
+                     evidence=[evidence_for("reuters.com")])])
+    text = bot._verdict_text(verdict)
+    assert "qid=7" in text and "подтверждено" in text
+    assert "reuters.com" in text
+
+
+def test_note_verdict_does_nothing_off_mode():
+    bot, _store = _stub_bot(Settings(bot_token="123456789:AA" + "x" * 33, fc_mode="off"))
+    verdict = PostVerdict(qid=1, status=Status.NOT_FOUND)
+    asyncio.run(bot.note_verdict(1, verdict))  # не должно падать и ничего не шлёт
+
+
+def test_store_qid_by_key_and_cards():
+    from app.store import Store
+
+    store = Store(":memory:")
+    store.add_channel("ch", "t")
+    store.upsert_post(1, "ch", "5", "key-1", "текст", 10, 1, 0)
+    qid = store.qid_by_key("key-1")
+    assert qid
+    store.map_card(100, 200, qid)
+    assert store.cards_for_qid(qid) == [(100, 200)]
+
+
+def test_note_verdict_edits_cards(monkeypatch):
+    bot, store = _stub_bot()
+    store.add_channel("ch", "t")
+    store.upsert_post(1, "ch", "5", "key-9", "текст", 10, 1, 0)
+    qid = store.qid_by_key("key-9")
+    store.set_ru_text(qid, "✅ **Пост**")
+    store.map_card(100, 200, qid)
+
+    calls = []
+    notes = []
+
+    async def fake_edit(text, chat_id, message_id, parse_mode=None):
+        calls.append((text, chat_id, message_id))
+
+    async def fake_send(chat_id, text, **kwargs):
+        notes.append((chat_id, text, kwargs.get("reply_markup")))
+
+    monkeypatch.setattr(bot.bot, "edit_message_text", fake_edit)
+    monkeypatch.setattr(bot.bot, "send_message", fake_send)
+    verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND)])
+    asyncio.run(bot.note_verdict(qid, verdict))
+
+    assert calls, "карточка должна обновиться"
+    text, chat_id, message_id = calls[0]
+    assert (chat_id, message_id) == (100, 200)
+    assert "не подтверждено" in text.lower()
+    assert notes and "метка добавлена" in notes[0][1]
+
+
+def test_admin_ids_parsing():
+    from app.main import _admin_ids
+
+    assert _admin_ids("1, 2 ,3") == {1, 2, 3}
+    assert _admin_ids("") == set()

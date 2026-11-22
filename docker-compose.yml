@@ -1,4 +1,25 @@
 services:
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      # обязателен для SearXNG; поменяй на свою строку и не коммить в публичный репо
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-tgnews_searxng_change_me}
+      - SEARXNG_BASE_URL=http://searxng:8080/
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    expose:
+      - "8080"
+    mem_limit: 400m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+
   app:
     build: .
     restart: unless-stopped
@@ -6,8 +27,10 @@ services:
     environment:
       - TZ=Europe/Berlin
       - PYTHONUNBUFFERED=1
+      - SEARX_URL=http://searxng:8080
     volumes:
       - ./data:/data
       - ./channels.txt:/app/channels.txt:ro
       - ./prompt.txt:/app/prompt.txt:ro
-      
+    depends_on:
+      - searxng

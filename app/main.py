@@ -1,30 +1,52 @@
-"""Точка входа: юзербот-коллектор + бот-интерфейс в одном процессе."""
+"""Точка входа: юзербот-коллектор + бот-интерфейс + фоновый фактчекинг."""
+
 import asyncio
-import os
 
 from .bot import AdminBot
+from .factcheck.repo import FactcheckRepo
+from .settings import Settings
 from .store import Store
 from .worker import Worker
 
-DEFAULT_API_ID = 2040
-DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"  # Telegram Desktop
+
+def _admin_ids(raw: str) -> set[int]:
+    return {int(x) for x in (raw or "").replace(" ", "").split(",") if x}
 
 
 async def main():
-    store = Store("/data/queue.db")
+    settings = Settings.load()
+    store = Store(settings.db_path)
+
+    fc_repo = FactcheckRepo(store.con, store.lock) if settings.fc_mode != "off" else None
+    if fc_repo is not None:
+        print(f"[fc] режим: {settings.fc_mode}")
+
     worker = Worker(
         store,
-        os.getenv("SESSION_PATH", "/data/session"),
-        int(os.environ.get("API_ID", DEFAULT_API_ID)),
-        os.environ.get("API_HASH", DEFAULT_API_HASH),
-        os.getenv("BOT_USERNAME", "lalsdjasdljkbot"),
+        settings.session_path,
+        settings.api_id,
+        settings.api_hash,
+        settings.bot_username,
+        fc_repo=fc_repo,
+        fc_mode=settings.fc_mode,
     )
     await worker.run()
 
-    admin_ids = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x}
+    admin_ids = _admin_ids(settings.admin_ids)
     if not admin_ids:
         raise SystemExit("ADMIN_IDS пуст — перечисли telegram-айди админов через запятую")
-    app = AdminBot(store, worker, admin_ids)
+
+    app = AdminBot(store, worker, admin_ids, settings=settings, fc_repo=fc_repo)
+
+    if fc_repo is not None:
+        from .factcheck.factory import build_service
+
+        service, _llm = build_service(settings, fc_repo)
+        app.fc_service = service
+        asyncio.create_task(
+            service.run_forever(on_done=app.note_verdict), name="factcheck"
+        )
+        print("[fc] фоновый воркер запущен")
 
     print(f"[run] admins: {admin_ids}")
     await app.run()  # polling блокирует — норм для одного процесса

@@ -27,7 +27,8 @@ MODEL = os.environ.get("OPENCODE_MODEL", "muse-spark-1.3-contributor")
 FALLBACK_MODEL = os.environ.get("OPENCODE_MODEL_FALLBACK", "glm-5.3-flash")
 SESSION = f"sess_{uuid.uuid4()}"
 TIMEOUT = int(os.getenv("LLM_TIMEOUT", "90"))
-MAX_OUT = int(os.getenv("LLM_MAX_OUTPUT", "2000"))
+# 3000: reasoning провайдера съедает часть бюджета, при 2000 ответ приходил пустым
+MAX_OUT = int(os.getenv("LLM_MAX_OUTPUT", "3000"))
 RETRIES = int(os.getenv("LLM_RETRIES", "2"))
 MODE = os.getenv("TRANSLATE_MODE", "single")  # single | batch (экспериментально)
 PARALLEL = int(os.getenv("LLM_PARALLEL", "5"))
@@ -148,20 +149,33 @@ async def _post(model: str, prompt: str) -> str:
 
 
 async def translate(text: str) -> str | None:
-    """Один пост. SKIP -> None; ошибка обоих провайдеров -> исключение."""
+    """Один пост. SKIP -> None; ошибка/пустой ответ обоих провайдеров -> исключение.
+
+    Пустой ответ — НЕ «SKIP». Раньше он возвращал None, и вызывающий код помечал
+    пост как dead: молчаливая потеря материала при обрезке по токенам.
+    """
     prompt = "SOURCE MESSAGE:\n" + text + "\n\nOUTPUT:"
     last_exc = None
+    skipped = False
     for model in (MODEL, FALLBACK_MODEL):
         try:
             res = await _post(model, prompt)
-            if res:
-                return None if res.upper().startswith("SKIP") else res
         except Exception as e:
             last_exc = e
             print(f"[llm] {model}: {e} — fallback")
+            continue
+        if not res:
+            print(f"[llm] {model}: пустой ответ (вероятно, обрезка по токенам) — fallback")
+            continue
+        if res.upper().startswith("SKIP"):
+            skipped = True
+            break
+        return res
+    if skipped:
+        return None
     if last_exc:
         raise last_exc
-    return None
+    raise RuntimeError("все модели вернули пустой ответ")
 
 
 def _batch_prompt(texts: list[str]) -> str:

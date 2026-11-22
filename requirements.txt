@@ -1,3 +1,7 @@
 telethon
 aiogram>=3.7
 qrcode
+aiohttp>=3.9
+openai>=1.40
+trafilatura>=2.0
+pydantic>=2.6

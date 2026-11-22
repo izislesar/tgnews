@@ -203,6 +203,14 @@ class Store:
         rows.sort(key=score, reverse=True)
         return rows[:limit]
 
+    def qid_by_key(self, key) -> int | None:
+        row = self.con.execute("SELECT qid FROM posts WHERE key=?", (key,)).fetchone()
+        return int(row[0]) if row else None
+
+    def cards_for_qid(self, qid) -> list[tuple[int, int]]:
+        return self.con.execute(
+            "SELECT chat_id, msg_id FROM cards WHERE qid=?", (qid,)).fetchall()
+
     def mark_dead(self, qid):
         with self.lock:
             self.con.execute("UPDATE posts SET state='dead' WHERE qid=?", (qid,))

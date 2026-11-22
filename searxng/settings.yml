@@ -1,0 +1,15 @@
+use_default_settings: true
+
+server:
+  # поменяй на свою случайную строку (или задай SEARXNG_SECRET в docker-compose)
+  secret_key: "tgnews_searxng_change_me"
+  limiter: false          # мы обращаемся из соседнего контейнера, а не из браузера
+  public_instance: false
+  image_proxy: false
+  http_protocol_version: "1.1"
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json                # без этого /search?format=json вернёт 403
