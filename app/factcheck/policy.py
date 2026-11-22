@@ -71,6 +71,7 @@ PUBLISHER_GROUPS: dict[str, str] = {
     "folha.uol.com.br": "media-west",
     "oglobo.globo.com": "media-west",
     "swissinfo.ch": "media-west",
+    "delfi.lt": "media-west",
     "srf.ch": "media-west",
     "npr.org": "media-west",
     "cbc.ca": "media-west",
@@ -115,6 +116,7 @@ PUBLISHER_GROUPS: dict[str, str] = {
     "proekt.media": "ru-independent",
     "tvrain.tv": "ru-independent",
     "echo.msk.ru": "ru-independent",
+    "theins.ru": "ru-independent",
     # украинские
     "ukrinform.ua": "ua-state",
     "kyivindependent.com": "ua-media",
