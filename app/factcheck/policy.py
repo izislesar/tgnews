@@ -186,6 +186,18 @@ PUBLISHER_GROUPS: dict[str, str] = {
 
 NON_CONFIRMING_GROUPS = {"reference", "other"}  # незнакомый домен не считается подтверждением
 
+# Для ПЕРЕПИСЫВАНИЯ фактов берём только независимые СМИ: государственные и
+# официальные источники исключены — заказчик просил независимые, не государственные.
+INDEPENDENT_GROUPS = {
+    "agencies-west", "agencies-regional", "media-west", "media-asia",
+    "regional-media", "ru-private", "ru-independent", "ua-media",
+    "by-media", "ca-media", "analysis",
+}
+STATE_OR_OFFICIAL_GROUPS = {
+    "ru-state", "ua-state", "cn-state", "tr-state",
+    "official", "ru-official", "ua-official", "reference", "other",
+}
+
 MIN_CONFIDENCE = 0.7
 MIN_GROUPS = 2
 # Одного сообщения агентства достаточно: это отраслевая норма и не плодит
@@ -238,6 +250,41 @@ def needed_groups(verdict: ClaimVerdict) -> int:
     return MIN_GROUPS
 
 
+def independent_evidence_groups(verdict: ClaimVerdict) -> set[str]:
+    """Группы источников, которым разрешено исправлять факты (не государственные)."""
+    return independent_groups(verdict.evidence) & INDEPENDENT_GROUPS
+
+
+def correction_eligible(verdict: ClaimVerdict, *, min_confidence: float = 0.8) -> bool:
+    """Можно ли править факт по этому утверждению.
+
+    Смотрим на СЫРОЙ вердикт судьи: «supported, но мало источников» (понижённый
+    до partial) — это не ошибка в тексте, править нечего.
+    """
+    if verdict.corrected or not verdict.claim.is_core:
+        return False
+    if verdict.claim.ctype is ClaimType.OPINION:
+        return False
+    if verdict.status not in (Status.REFUTED, Status.CONTESTED, Status.PARTIAL):
+        return False
+    if verdict.confidence < min_confidence:
+        return False
+    groups = independent_evidence_groups(verdict)
+    if not groups:
+        return False
+    if verdict.claim.ctype in (ClaimType.ATTRIBUTED, ClaimType.QUOTE):
+        return True
+    # числа/даты/события: агентство или минимум две независимые группы
+    if groups & SUFFICIENT_SINGLE_GROUPS:
+        return True
+    return len(groups) >= MIN_GROUPS
+
+
+def eligible_corrections(verdict: PostVerdict, *, min_confidence: float = 0.8) -> list[ClaimVerdict]:
+    return [item for item in verdict.claims
+            if correction_eligible(item, min_confidence=min_confidence)]
+
+
 def confirmation_ok(verdict: ClaimVerdict) -> bool:
     if verdict.status is not Status.SUPPORTED:
         return False
@@ -265,6 +312,8 @@ def aggregate(verdicts: list[ClaimVerdict]) -> Status:
         return Status.SKIPPED
     worst = Status.SUPPORTED
     for verdict in core:
+        if verdict.corrected:  # факт исправлен в тексте — метка не нужна
+            continue
         status = effective_status(verdict)
         if _SEVERITY[status] > _SEVERITY[worst]:
             worst = status
@@ -285,7 +334,7 @@ def labeled_claims(verdict: PostVerdict) -> list[ClaimVerdict]:
     for item in verdict.claims:
         if not item.claim.is_core or item.claim.ctype is ClaimType.OPINION:
             continue
-        if effective_status(item) is Status.SUPPORTED:
+        if item.corrected or effective_status(item) is Status.SUPPORTED:
             continue
         out.append(item)
     return out

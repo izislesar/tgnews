@@ -64,6 +64,13 @@ def _print_human(verdict, text: str) -> None:
           f"{verdict.elapsed_s}s")
     disclaimer = verdict.disclaimer
     print(f"ДИСКЛЕЙМЕР: {disclaimer or '— (не нужен)'}")
+    if verdict.corrections:
+        print("\nИСПРАВЛЕНО (вариант 2):")
+        for item in verdict.corrections:
+            print(f"  былo: {item.old[:90]}")
+            print(f"  стало: {item.new[:90]}  [{item.source_url[:70]}]")
+    if verdict.corrected_text:
+        print("\nПЕРЕПИСАННЫЙ ПОСТ:\n" + verdict.corrected_text[:1200])
     evidence = render_evidence(verdict, limit=8)
     if evidence:
         print("\nКАК ПРОВЕРЯЛИ:")
@@ -80,6 +87,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cycles", type=int, default=None)
     parser.add_argument("--json", action="store_true", help="машинный вывод")
     parser.add_argument("--save", action="store_true", help="сохранить вердикт в БД")
+    parser.add_argument("--fix", action="store_true",
+                        help="переписать пост под данные независимых источников")
     args = parser.parse_args(argv)
 
     settings = Settings.load(args.env_file)
@@ -98,7 +107,8 @@ def main(argv: list[str] | None = None) -> int:
     async def run():
         service, llm = build_service(settings)
         try:
-            verdict = await service.check_text(text, qid=args.qid, tier=args.tier)
+            verdict = await service.check_text(text, qid=args.qid, tier=args.tier,
+                                              fix_facts=True if args.fix else None)
         finally:
             await llm.close()
             await service.search.close()

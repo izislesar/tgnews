@@ -299,7 +299,8 @@ def test_refine_adds_denial_query():
 
 
 # ---------- сервис (циклы) ----------
-def _service(settings, claim_payload, hits, docs, judge):
+def _service(settings, claim_payload, hits, docs, judge, *, corrector=None,
+             fix_facts=False):
     extractor = ClaimExtractor(FakeLlm(claim_payload), FakePrompts(), max_claims=3)
     return FactCheckService(
         settings=settings,
@@ -309,6 +310,8 @@ def _service(settings, claim_payload, hits, docs, judge):
         judge=judge,
         extractor=extractor,
         prompts=FakePrompts(),
+        corrector=corrector,
+        fix_facts=fix_facts,
     )
 
 
@@ -799,3 +802,153 @@ def test_job_tier_is_preserved(tmp_path):
     repo.enqueue(1, "t2")
     assert repo.claim_next() == 1
     assert repo.job_tier(1) == "t2"
+
+
+# ---------- вариант 2: переписывание под независимые источники ----------
+def _refuted_verdict(domains=("reuters.com", "bbc.com"), conf=0.9,
+                     ctype=ClaimType.NUMERIC):
+    claim = core_claim("Погибли 29 человек", ctype=ctype, numbers=("29",))
+    return ClaimVerdict(claim=claim, status=Status.REFUTED, confidence=conf,
+                        evidence=[evidence_for(domain) for domain in domains])
+
+
+def test_correction_blocked_for_state_media():
+    verdict = _refuted_verdict(("ria.ru", "tass.ru"))
+    assert policy.correction_eligible(verdict, min_confidence=0.8) is False
+
+
+def test_correction_allows_single_independent_agency():
+    assert policy.correction_eligible(_refuted_verdict(("reuters.com",)),
+                                      min_confidence=0.8) is True
+
+
+def test_correction_needs_two_media_without_agency():
+    assert policy.correction_eligible(_refuted_verdict(("bbc.com",)),
+                                      min_confidence=0.8) is False
+    assert policy.correction_eligible(_refuted_verdict(("bbc.com", "meduza.io")),
+                                      min_confidence=0.8) is True
+
+
+def test_correction_ignores_weakly_supported_claim():
+    verdict = ClaimVerdict(claim=core_claim(), status=Status.SUPPORTED,
+                           confidence=0.9, evidence=[evidence_for("bbc.com")])
+    assert policy.correction_eligible(verdict) is False
+
+
+def test_corrector_applies_valid_change():
+    from app.factcheck.correct import LlmCorrector
+
+    payload = {
+        "changed": True,
+        "corrected_text": "Погибли 12 человек (по данным Reuters).",
+        "confidence": 0.92,
+        "corrections": [{"claim_idx": 0, "old": "29 человек", "new": "12 человек",
+                         "source_url": "https://reuters.com/a"}],
+    }
+    corrector = LlmCorrector(FakeLlm(payload), FakePrompts())
+    verdict = PostVerdict(claims=[_refuted_verdict(("reuters.com", "bbc.com"))])
+    result = asyncio.run(corrector.correct("Погибли 29 человек.", verdict))
+    assert result.changed is True
+    assert result.text and "12 человек" in result.text
+    assert result.fixed == {0}
+
+
+def test_corrector_rejects_invented_source():
+    from app.factcheck.correct import LlmCorrector
+
+    payload = {
+        "changed": True,
+        "corrected_text": "Погибли 12 человек (по данным Reuters).",
+        "confidence": 0.95,
+        "corrections": [{"claim_idx": 0, "old": "29 человек", "new": "12 человек",
+                         "source_url": "https://fake.example/x"}],
+    }
+    corrector = LlmCorrector(FakeLlm(payload), FakePrompts())
+    verdict = PostVerdict(claims=[_refuted_verdict(("reuters.com",))])
+    assert asyncio.run(corrector.correct("Погибли 29 человек.", verdict)).changed is False
+
+
+def test_corrector_rejects_low_confidence():
+    from app.factcheck.correct import LlmCorrector
+
+    payload = {
+        "changed": True,
+        "corrected_text": "Погибли 12 человек (по данным Reuters).",
+        "confidence": 0.3,
+        "corrections": [{"claim_idx": 0, "old": "29 человек", "new": "12 человек",
+                         "source_url": "https://reuters.com/a"}],
+    }
+    corrector = LlmCorrector(FakeLlm(payload), FakePrompts())
+    verdict = PostVerdict(claims=[_refuted_verdict(("reuters.com",))])
+    assert asyncio.run(corrector.correct("Погибли 29 человек.", verdict)).changed is False
+
+
+def test_service_rewrites_post_and_drops_label():
+    from app.factcheck.correct import LlmCorrector
+
+    claim = core_claim("Дроновые атаки почти вдвое снизили нефтепереработку в России",
+                       ctype=ClaimType.EVENT, numbers=())
+    judge = FakeJudge([ClaimVerdict(
+        claim=claim, status=Status.REFUTED, confidence=0.9,
+        evidence=[evidence_for("reuters.com"), evidence_for("bbc.com")])])
+    correction_payload = {
+        "changed": True,
+        "corrected_text": ("Дроновые атаки снизили нефтепереработку в России примерно "
+                           "на треть (по данным Reuters)."),
+        "confidence": 0.9,
+        "corrections": [{"claim_idx": 0, "old": "почти вдвое", "new": "примерно на треть",
+                         "source_url": "https://reuters.com/a"}],
+    }
+    corrector = LlmCorrector(FakeLlm(correction_payload), FakePrompts())
+    service = _service(make_settings(fc_fix_facts=True), CLAIM_PAYLOAD, HITS, DOCS,
+                       judge, corrector=corrector, fix_facts=True)
+    original = ("Дроновые атаки почти вдвое снизили нефтепереработку в России в ноябре, "
+                "сообщают источники.")
+    verdict = asyncio.run(service.check_text(original, tier="t2", fix_facts=True))
+    assert verdict.corrected_text and "на треть" in verdict.corrected_text
+    assert verdict.claims[0].corrected is True
+    assert verdict.disclaimer is None  # исправленный факт метку не требует
+
+
+def test_body_uses_corrected_text():
+    bot, _store = _stub_bot()
+    verdict = PostVerdict(qid=1, status=Status.SUPPORTED,
+                          corrected_text="✅ **Исправленный текст**",
+                          corrections=[])
+    body = bot._body({"ru_text": "Старый текст", "username": "ch", "ids": "1"}, verdict)
+    assert "Исправленный текст" in body and "Старый текст" not in body
+
+
+def test_repo_persists_correction(tmp_path):
+    _con, repo = _repo_with_post(tmp_path)
+    from app.factcheck.models import CorrectionItem
+
+    verdict = PostVerdict(qid=1, status=Status.SUPPORTED,
+                          corrected_text="Исправленный текст",
+                          corrections=[CorrectionItem(claim_idx=0, claim="x", old="29",
+                                                      new="12",
+                                                      source_url="https://reuters.com/a")],
+                          claims=[ClaimVerdict(claim=core_claim(), status=Status.REFUTED,
+                                               corrected=True)])
+    repo.save(1, verdict, version="v1")
+    loaded = repo.load(1)
+    assert loaded is not None
+    assert loaded.corrected_text == "Исправленный текст"
+    assert loaded.corrections[0].new == "12"
+    assert loaded.claims[0].corrected is True
+
+
+def test_corrected_text_strips_service_markers():
+    from app.factcheck.correct import LlmCorrector
+
+    payload = {
+        "changed": True,
+        "corrected_text": "<<<\nПогибли 12 человек (по данным Reuters).\n>>>",
+        "confidence": 0.9,
+        "corrections": [{"claim_idx": 0, "old": "29 человек", "new": "12 человек",
+                         "source_url": "https://reuters.com/a"}],
+    }
+    corrector = LlmCorrector(FakeLlm(payload), FakePrompts())
+    verdict = PostVerdict(claims=[_refuted_verdict(("reuters.com",))])
+    result = asyncio.run(corrector.correct("Погибли 29 человек.", verdict))
+    assert result.text == "Погибли 12 человек (по данным Reuters)."

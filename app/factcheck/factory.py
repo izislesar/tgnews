@@ -5,6 +5,7 @@ from __future__ import annotations
 from ..llm_client import LlmClient, Prompts
 from ..settings import Settings
 from .claims import ClaimExtractor
+from .correct import LlmCorrector
 from .fetch import HttpFetcher
 from .judge import LlmJudge
 from .repo import FactcheckRepo
@@ -51,6 +52,11 @@ def build_service(
         extractor=ClaimExtractor(
             llm, prompts, max_claims=settings.fc_max_claims, model=settings.claim_model
         ),
+        corrector=LlmCorrector(
+            llm, prompts, model=settings.model,
+            min_confidence=settings.fc_fix_min_conf,
+        ),
+        fix_facts=settings.fc_fix_facts,
         prompts=prompts,
     )
     return service, llm

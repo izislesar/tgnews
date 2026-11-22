@@ -41,6 +41,11 @@ def _int(env: dict[str, str], name: str, default: int) -> int:
         return default
 
 
+def _bool(env: dict[str, str], name: str, default: bool) -> bool:
+    raw = _get(env, name, "1" if default else "0")
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 def _float(env: dict[str, str], name: str, default: float) -> float:
     try:
         return float(_get(env, name, str(default)) or default)
@@ -106,6 +111,8 @@ class Settings:
     fc_snippets_per_claim: int = 3
     fc_min_text: int = 200
     fc_local_timeout: float = 8.0
+    fc_fix_facts: bool = False   # вариант 2: переписывать пост под данные источников
+    fc_fix_min_conf: float = 0.8
     fc_claim_model: str = ""  # пусто -> fallback_model (дешёвая модель)
     fc_judge_model: str = ""  # пусто -> fallback_model
 
@@ -166,6 +173,8 @@ class Settings:
             fc_snippets_per_claim=_int(env, "FC_SNIPPETS", defaults.fc_snippets_per_claim),
             fc_min_text=_int(env, "FC_MIN_TEXT", defaults.fc_min_text),
             fc_local_timeout=_float(env, "FC_LOCAL_TIMEOUT", defaults.fc_local_timeout),
+            fc_fix_facts=_bool(env, "FC_FIX_FACTS", defaults.fc_fix_facts),
+            fc_fix_min_conf=_float(env, "FC_FIX_MIN_CONF", defaults.fc_fix_min_conf),
             fc_claim_model=_get(env, "FC_CLAIM_MODEL", defaults.fc_claim_model)
             or defaults.fc_claim_model,
             fc_judge_model=_get(env, "FC_JUDGE_MODEL", defaults.fc_judge_model)

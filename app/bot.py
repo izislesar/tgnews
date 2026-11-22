@@ -3,6 +3,7 @@ import asyncio
 import html
 import json
 import re
+from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command, CommandObject
@@ -398,7 +399,9 @@ class AdminBot:
             return None
 
     def _body(self, post: dict, verdict: PostVerdict | None) -> str:
-        ru = post.get("ru_text") or post.get("text") or ""
+        # вариант 2: если пост переписан под корректные данные — публикуем его
+        ru = ((verdict.corrected_text if verdict and verdict.corrected_text else None)
+              or post.get("ru_text") or post.get("text") or "")
         ids = post.get("ids") or ""
         url = f"https://t.me/{post.get('username')}/{ids.split(',')[0]}"
         body = fmt_html(ru) + "\n" * self.link_gap + f'<a href="{url}">{url}</a>'
@@ -448,6 +451,8 @@ class AdminBot:
                    "contested": "⚠️", "refuted": "🚫", "skipped": "—"}
         status = STATUS_RU.get(verdict.status.value, verdict.status.value)
         lines = [f"<b>Проверка</b> qid={verdict.qid}: <b>{status}</b>"]
+        if verdict.corrected_text:
+            lines.append("✍️ Текст переписан по независимым источникам")
         if not verdict.claims:
             lines.append("Утверждений для проверки нет (мнения, реклама или "
                          "извлечение не удалось).")
@@ -465,6 +470,13 @@ class AdminBot:
                 group = GROUP_RU.get(evidence.publisher_group, evidence.publisher_group)
                 lines.append(f'    <a href="{url}">{html.escape(evidence.domain)}</a>'
                              f" · {html.escape(group)}")
+        if verdict.corrections:
+            lines.append("")
+            lines.append("<b>Исправлено:</b>")
+            for item in verdict.corrections[:5]:
+                domain = urlparse(item.source_url).netloc
+                lines.append(f"• {html.escape(item.old[:70])} → "
+                             f"{html.escape(item.new[:70])} <i>({html.escape(domain)})</i>")
         if verdict.degraded:
             lines.append("")
             lines.append("⚠️ Проверка не завершилась: поиск/загрузка были недоступны. "

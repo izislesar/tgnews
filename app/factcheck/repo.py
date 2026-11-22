@@ -7,7 +7,8 @@ import sqlite3
 import threading
 import time
 
-from .models import ClaimVerdict, Claim, ClaimType, Evidence, PostVerdict, Priority, Status
+from .models import (ClaimVerdict, Claim, ClaimType, CorrectionItem, Evidence, PostVerdict,
+                     Priority, Status)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS fc_jobs(
@@ -25,6 +26,7 @@ CREATE INDEX IF NOT EXISTS idx_fc_jobs_state ON fc_jobs(state, next_try);
 CREATE TABLE IF NOT EXISTS claims(
     qid INTEGER, idx INTEGER, claim_key TEXT, text TEXT, ctype TEXT, priority TEXT,
     status TEXT, confidence REAL, note TEXT, cycles INTEGER, error TEXT,
+    corrected INTEGER DEFAULT 0,
     PRIMARY KEY(qid, idx)
 );
 CREATE TABLE IF NOT EXISTS evidence(
@@ -44,6 +46,8 @@ _POST_COLUMNS = {
     "fc_version": "TEXT",
     "fc_ts": "REAL",
     "fc_degraded": "INTEGER",
+    "fc_corrected": "TEXT",
+    "fc_corrections": "TEXT",
     "neutral_ok": "INTEGER",
 }
 
@@ -59,6 +63,9 @@ class FactcheckRepo:
     def ensure_schema(self) -> None:
         with self.lock:
             self.con.executescript(_SCHEMA)
+            claim_cols = {row[1] for row in self.con.execute("PRAGMA table_info(claims)")}
+            if "corrected" not in claim_cols:
+                self.con.execute("ALTER TABLE claims ADD COLUMN corrected INTEGER DEFAULT 0")
             columns = {row[1] for row in self.con.execute("PRAGMA table_info(posts)")}
             for name, sql_type in _POST_COLUMNS.items():
                 if name not in columns:
@@ -143,11 +150,13 @@ class FactcheckRepo:
         now = time.time()
         summary = verdict.disclaimer or ""
         with self.lock:
+            corrections = json.dumps(
+                [item.model_dump() for item in verdict.corrections], ensure_ascii=False)
             self.con.execute(
                 "UPDATE posts SET fc_status=?, fc_summary=?, fc_version=?, fc_ts=?, "
-                "fc_degraded=? WHERE qid=?",
-                (verdict.status.value, summary, version, now,
-                 int(verdict.degraded), qid),
+                "fc_degraded=?, fc_corrected=?, fc_corrections=? WHERE qid=?",
+                (verdict.status.value, summary, version, now, int(verdict.degraded),
+                 verdict.corrected_text, corrections, qid),
             )
             self.con.execute(
                 "DELETE FROM evidence WHERE claim_key IN "
@@ -156,10 +165,12 @@ class FactcheckRepo:
             for item in verdict.claims:
                 self.con.execute(
                     "INSERT OR REPLACE INTO claims(qid, idx, claim_key, text, ctype, priority, "
-                    "status, confidence, note, cycles, error) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    "status, confidence, note, cycles, error, corrected) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (qid, item.claim.idx, item.claim.claim_key, item.claim.text,
                      item.claim.ctype.value, item.claim.priority.value, item.status.value,
-                     item.confidence, item.note, item.cycles, item.error),
+                     item.confidence, item.note, item.cycles, item.error,
+                     int(item.corrected)),
                 )
                 for evidence in item.evidence:
                     self.con.execute(
@@ -173,7 +184,8 @@ class FactcheckRepo:
 
     def load(self, qid: int) -> PostVerdict | None:
         row = self.con.execute(
-            "SELECT fc_status, fc_summary, fc_version, fc_degraded FROM posts WHERE qid=?",
+            "SELECT fc_status, fc_summary, fc_version, fc_degraded, fc_corrected, "
+            "fc_corrections FROM posts WHERE qid=?",
             (qid,),
         ).fetchone()
         # fc_status IS NULL = пост ещё не проверяли. Возвращать «skipped» нельзя:
@@ -181,12 +193,13 @@ class FactcheckRepo:
         if not row or row[0] is None:
             return None
         claims_rows = self.con.execute(
-            "SELECT idx, text, ctype, priority, status, confidence, note, cycles, error "
-            "FROM claims WHERE qid=? ORDER BY idx",
+            "SELECT idx, text, ctype, priority, status, confidence, note, cycles, error, "
+            "corrected FROM claims WHERE qid=? ORDER BY idx",
             (qid,),
         ).fetchall()
         claims: list[ClaimVerdict] = []
-        for idx, text, ctype, priority, status, confidence, note, cycles, error in claims_rows:
+        for (idx, text, ctype, priority, status, confidence, note, cycles, error,
+             corrected) in claims_rows:
             claim = Claim(
                 idx=idx, text=text,
                 ctype=ClaimType(ctype or "event"),
@@ -209,14 +222,22 @@ class FactcheckRepo:
                     cycles=cycles or 0,
                     error=error,
                     evidence=evidence,
+                    corrected=bool(corrected),
                 )
             )
+        corrections = []
+        try:
+            corrections = [CorrectionItem(**item) for item in json.loads(row[5] or "[]")]
+        except Exception:
+            corrections = []
         return PostVerdict(
             status=Status(row[0]),
             claims=claims,
             qid=qid,
             note=row[1] or "",
             degraded=bool(row[3]),
+            corrected_text=row[4],
+            corrections=corrections,
         )
 
     def log_run(self, qid: int, *, cycle: int, stage: str, model: str = "",

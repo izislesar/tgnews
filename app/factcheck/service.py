@@ -12,6 +12,7 @@ from ..settings import Settings
 from . import policy
 from . import query as query_mod
 from .claims import ClaimExtractor
+from .correct import LlmCorrector
 from .fetch import HttpFetcher, select_snippets
 from .judge import LlmJudge
 from .models import (
@@ -54,6 +55,8 @@ class FactCheckService:
         judge: LlmJudge,
         extractor: ClaimExtractor,
         prompts: Prompts,
+        corrector: LlmCorrector | None = None,
+        fix_facts: bool = False,
         clock=time.monotonic,
     ):
         self.settings = settings
@@ -63,6 +66,8 @@ class FactCheckService:
         self.judge = judge
         self.extractor = extractor
         self.prompts = prompts
+        self.corrector = corrector
+        self.fix_facts = fix_facts
         self.clock = clock
 
     # ---------- одна проверка ----------
@@ -73,6 +78,7 @@ class FactCheckService:
         qid: int | None = None,
         tier: str = "t1",
         post_ts: float | None = None,
+        fix_facts: bool | None = None,
     ) -> PostVerdict:
         started = self.clock()
         max_calls = self.settings.fc_calls_per_post * (2 if tier == "t2" else 1)
@@ -132,7 +138,33 @@ class FactCheckService:
             verdict.note = f"часть проверок не удалась ({len(errored)} из {len(checked)})"
         else:
             verdict.note = verdict.disclaimer or ""
-        return verdict
+        return await self._maybe_correct(text, verdict, fix_facts, budget)
+
+    async def _maybe_correct(self, text: str, verdict: PostVerdict,
+                             fix_facts: bool | None, budget: Budget) -> PostVerdict:
+        """Вариант 2: переписать пост под данные независимых источников."""
+        enabled = self.fix_facts if fix_facts is None else fix_facts
+        if not enabled or self.corrector is None or verdict.degraded:
+            return verdict
+        try:
+            budget.take()
+            correction = await self.corrector.correct(text, verdict)
+        except BudgetExceeded:
+            return verdict
+        if not correction.changed or not correction.text:
+            return verdict
+        claims = [item.model_copy(update={"corrected": item.claim.idx in correction.fixed})
+                  for item in verdict.claims]
+        updated = verdict.model_copy(update={
+            "claims": claims,
+            "corrected_text": correction.text,
+            "corrections": correction.items,
+        })
+        updated = updated.model_copy(update={"status": policy.aggregate(claims)})
+        updated.note = updated.disclaimer or ""
+        print(f"[fc.correct] qid={verdict.qid}: правок {len(correction.items)}, "
+              f"уверенность {correction.confidence:.2f}")
+        return updated
 
     async def _check_claim(
         self,

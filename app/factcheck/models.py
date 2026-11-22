@@ -98,6 +98,16 @@ class Evidence(BaseModel):
     title: str = ""
 
 
+class CorrectionItem(BaseModel):
+    """Одна правка: что было, что стало и на каком источнике основано."""
+
+    claim_idx: int
+    claim: str = ""
+    old: str = ""
+    new: str = ""
+    source_url: str = ""
+
+
 class ClaimVerdict(BaseModel):
     claim: Claim
     status: Status = Status.NOT_FOUND
@@ -107,6 +117,7 @@ class ClaimVerdict(BaseModel):
     queries: list[str] = Field(default_factory=list)
     cycles: int = 0
     error: str | None = None
+    corrected: bool = False  # факт исправлен в тексте, метка по нему не нужна
 
     @property
     def groups(self) -> set[str]:
@@ -121,6 +132,8 @@ class PostVerdict(BaseModel):
     calls: int = 0
     elapsed_s: float = 0.0
     degraded: bool = False  # поиск/фетч лежали: это не «не подтверждено», это «не проверили»
+    corrected_text: str | None = None
+    corrections: list[CorrectionItem] = Field(default_factory=list)
 
     @property
     def core_claims(self) -> list[ClaimVerdict]:
