@@ -170,9 +170,11 @@ class Worker:
         self.store.upsert_post(chat.id, username, ids, key, text, views, reactions,
                                has_media=any(m.photo or m.document for m in msgs))
         if self.fc_repo is not None and self.fc_mode != "off":
-            qid = self.store.qid_by_key(key)
-            if qid:
-                self.fc_repo.enqueue(qid, "t1")
+            # дубль (state='dup') проверять незачем: это та же новость из другого канала
+            if self.store.state_by_key(key) == "new":
+                qid = self.store.qid_by_key(key)
+                if qid:
+                    self.fc_repo.enqueue(qid, "t1")
 
     async def on_message(self, event):
         m = event.message

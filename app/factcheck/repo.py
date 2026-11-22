@@ -43,8 +43,11 @@ _POST_COLUMNS = {
     "fc_summary": "TEXT",
     "fc_version": "TEXT",
     "fc_ts": "REAL",
+    "fc_degraded": "INTEGER",
     "neutral_ok": "INTEGER",
 }
+
+MAX_ATTEMPTS = 3
 
 
 class FactcheckRepo:
@@ -70,7 +73,8 @@ class FactcheckRepo:
                 "INSERT INTO fc_jobs(qid, tier, state, created, updated, next_try) "
                 "VALUES(?,?, 'queued', ?, ?, 0) "
                 "ON CONFLICT(qid) DO UPDATE SET state='queued', updated=excluded.updated, "
-                "next_try=0 WHERE fc_jobs.state IN ('done','error','skipped')",
+                "next_try=0, attempts=0 "
+                "WHERE fc_jobs.state IN ('done','error','skipped')",
                 (qid, tier, now, now),
             )
             self.con.commit()
@@ -81,6 +85,12 @@ class FactcheckRepo:
             self.con.execute(
                 "UPDATE fc_jobs SET state='queued' WHERE state='running' AND locked_until < ?",
                 (now,),
+            )
+            # задача, которая падала MAX_ATTEMPTS раз, не должна крутиться вечно
+            self.con.execute(
+                "UPDATE fc_jobs SET state='error', locked_until=NULL "
+                "WHERE state='retry' AND attempts >= ?",
+                (MAX_ATTEMPTS,),
             )
             row = self.con.execute(
                 "SELECT qid FROM fc_jobs WHERE state IN ('queued','retry') AND next_try <= ? "
@@ -116,6 +126,10 @@ class FactcheckRepo:
             )
             self.con.commit()
 
+    def job_tier(self, qid: int) -> str:
+        row = self.con.execute("SELECT tier FROM fc_jobs WHERE qid=?", (qid,)).fetchone()
+        return (row[0] if row and row[0] else "t1")
+
     def post_text(self, qid: int) -> str | None:
         row = self.con.execute("SELECT text FROM posts WHERE qid=?", (qid,)).fetchone()
         return row[0] if row else None
@@ -130,9 +144,14 @@ class FactcheckRepo:
         summary = verdict.disclaimer or ""
         with self.lock:
             self.con.execute(
-                "UPDATE posts SET fc_status=?, fc_summary=?, fc_version=?, fc_ts=? WHERE qid=?",
-                (verdict.status.value, summary, version, now, qid),
+                "UPDATE posts SET fc_status=?, fc_summary=?, fc_version=?, fc_ts=?, "
+                "fc_degraded=? WHERE qid=?",
+                (verdict.status.value, summary, version, now,
+                 int(verdict.degraded), qid),
             )
+            self.con.execute(
+                "DELETE FROM evidence WHERE claim_key IN "
+                "(SELECT claim_key FROM claims WHERE qid=?)", (qid,))
             self.con.execute("DELETE FROM claims WHERE qid=?", (qid,))
             for item in verdict.claims:
                 self.con.execute(
@@ -154,9 +173,12 @@ class FactcheckRepo:
 
     def load(self, qid: int) -> PostVerdict | None:
         row = self.con.execute(
-            "SELECT fc_status, fc_summary, fc_version FROM posts WHERE qid=?", (qid,)
+            "SELECT fc_status, fc_summary, fc_version, fc_degraded FROM posts WHERE qid=?",
+            (qid,),
         ).fetchone()
-        if not row:
+        # fc_status IS NULL = пост ещё не проверяли. Возвращать «skipped» нельзя:
+        # вызывающий код решит, что вердикт есть, и не поставит задачу в очередь.
+        if not row or row[0] is None:
             return None
         claims_rows = self.con.execute(
             "SELECT idx, text, ctype, priority, status, confidence, note, cycles, error "
@@ -190,10 +212,11 @@ class FactcheckRepo:
                 )
             )
         return PostVerdict(
-            status=Status(row[0] or "skipped"),
+            status=Status(row[0]),
             claims=claims,
             qid=qid,
             note=row[1] or "",
+            degraded=bool(row[3]),
         )
 
     def log_run(self, qid: int, *, cycle: int, stage: str, model: str = "",
@@ -214,6 +237,13 @@ class FactcheckRepo:
             "ORDER BY COUNT(*) DESC",
             (cutoff,),
         ).fetchall()
+
+    def degraded_count(self, days: int = 7) -> int:
+        cutoff = time.time() - days * 86400
+        row = self.con.execute(
+            "SELECT COUNT(*) FROM posts WHERE fc_ts > ? AND fc_degraded=1", (cutoff,)
+        ).fetchone()
+        return int(row[0]) if row else 0
 
     def pending(self) -> int:
         row = self.con.execute(

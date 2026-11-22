@@ -116,6 +116,10 @@ class Settings:
     def load(cls, env_file: str | os.PathLike[str] | None = None) -> "Settings":
         env = _read_env_file(Path(env_file)) if env_file else {}
         defaults = cls()  # slots-датакласс: значения по умолчанию берём из экземпляра
+        mode = (_get(env, "FC_ENABLED", defaults.fc_mode) or defaults.fc_mode).lower()
+        if mode not in ("off", "shadow", "on"):
+            print(f"[settings] FC_ENABLED={mode!r} не распознан — считаю off")
+            mode = "off"
         return cls(
             bot_token=_get(env, "BOT_TOKEN", defaults.bot_token) or defaults.bot_token,
             admin_ids=_get(env, "ADMIN_IDS", defaults.admin_ids) or defaults.admin_ids,
@@ -152,7 +156,7 @@ class Settings:
             fetch_concurrency=_int(env, "FETCH_CONCURRENCY", defaults.fetch_concurrency),
             fetch_min_interval=_float(env, "FETCH_MIN_INTERVAL", defaults.fetch_min_interval),
             user_agent=_get(env, "USER_AGENT", defaults.user_agent) or defaults.user_agent,
-            fc_mode=(_get(env, "FC_ENABLED", defaults.fc_mode) or defaults.fc_mode).lower(),
+            fc_mode=mode,
             fc_cycles=_int(env, "FC_CYCLES", defaults.fc_cycles),
             fc_max_claims=_int(env, "FC_MAX_CLAIMS", defaults.fc_max_claims),
             fc_deadline_s=_float(env, "FC_DEADLINE_S", defaults.fc_deadline_s),

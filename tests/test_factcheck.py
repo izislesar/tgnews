@@ -581,7 +581,7 @@ def test_store_qid_by_key_and_cards():
     qid = store.qid_by_key("key-1")
     assert qid
     store.map_card(100, 200, qid)
-    assert store.cards_for_qid(qid) == [(100, 200)]
+    assert store.cards_for_qid(qid) == [(100, 200, "text")]
 
 
 def test_note_verdict_edits_cards(monkeypatch):
@@ -619,3 +619,183 @@ def test_admin_ids_parsing():
 
     assert _admin_ids("1, 2 ,3") == {1, 2, 3}
     assert _admin_ids("") == set()
+
+
+# ---------- регрессии второго прохода ----------
+def _repo_with_post(tmp_path):
+    import sqlite3
+    from app.factcheck.repo import FactcheckRepo
+
+    con = sqlite3.connect(tmp_path / "r.db")
+    con.execute("CREATE TABLE posts(qid INTEGER PRIMARY KEY, text TEXT, ts REAL)")
+    con.execute("INSERT INTO posts(qid, text, ts) VALUES(1, 'текст', 1.0)")
+    return con, FactcheckRepo(con)
+
+
+def test_repo_load_is_none_before_check(tmp_path):
+    _con, repo = _repo_with_post(tmp_path)
+    assert repo.load(1) is None  # нет fc_status -> «не проверяли», а не «skipped»
+
+
+def test_repo_persists_degraded(tmp_path):
+    _con, repo = _repo_with_post(tmp_path)
+    repo.save(1, PostVerdict(qid=1, status=Status.NOT_FOUND, degraded=True,
+                             claims=[ClaimVerdict(claim=core_claim(), status=Status.NOT_FOUND)]))
+    loaded = repo.load(1)
+    assert loaded is not None and loaded.degraded is True
+    assert loaded.disclaimer is None  # degraded не даёт метки и после перезагрузки
+
+
+def test_repo_stops_retrying_after_cap(tmp_path):
+    con, repo = _repo_with_post(tmp_path)
+    repo.enqueue(1)
+    for _ in range(3):
+        assert repo.claim_next() == 1
+        repo.fail(1, "boom")
+        con.execute("UPDATE fc_jobs SET next_try=0")
+        con.commit()
+    assert repo.claim_next() is None  # исчерпала попытки -> error
+    assert repo.pending() == 0
+
+
+def test_invalid_fc_mode_falls_back_to_off(tmp_path, monkeypatch):
+    for name in ("FC_ENABLED",):
+        monkeypatch.delenv(name, raising=False)
+    env = tmp_path / ".env"
+    env.write_text("FC_ENABLED=true\n", encoding="utf-8")
+    assert Settings.load(env).fc_mode == "off"
+
+
+def test_note_verdict_ignores_undelivered(monkeypatch):
+    bot, store = _stub_bot()
+    store.add_channel("ch", "t")
+    store.upsert_post(1, "ch", "5", "key-undelivered", "текст", 1, 1, 0)
+    qid = store.qid_by_key("key-undelivered")
+
+    calls = []
+
+    async def fake_edit(*args, **kwargs):
+        calls.append("edit")
+
+    async def fake_send(*args, **kwargs):
+        calls.append("send")
+
+    monkeypatch.setattr(bot.bot, "edit_message_text", fake_edit)
+    monkeypatch.setattr(bot.bot, "send_message", fake_send)
+    verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND)])
+    asyncio.run(bot.note_verdict(qid, verdict))
+    assert calls == []  # карточку админ ещё не получал — не шумим
+
+
+def test_verdict_text_handles_empty_claims():
+    bot, _ = _stub_bot()
+    text = bot._verdict_text(PostVerdict(qid=5, status=Status.SKIPPED))
+    assert "Утверждений для проверки нет" in text
+
+
+def test_store_state_by_key():
+    from app.store import Store
+
+    store = Store(":memory:")
+    store.add_channel("ch", "t")
+    store.upsert_post(1, "ch", "5", "k-new", "Удар по заводу в Рязани, 29 человек погибло", 10, 1, 0)
+    store.upsert_post(1, "ch", "6", "k-dup", "Ночной удар по заводу в Рязани, 29 человек погибло", 10, 1, 0)
+    assert store.state_by_key("k-new") == "new"
+    assert store.state_by_key("k-dup") == "dup"
+
+
+def test_pool_copy_updates_after_late_verdict(monkeypatch):
+    from app.bot import AdminBot
+    from app.store import Store
+
+    settings = Settings(bot_token="123456789:AA" + "x" * 33, fc_mode="on",
+                        approval_chat_id="777")
+    store = Store(":memory:")
+    bot = AdminBot(store, None, {1}, settings=settings, fc_repo=None)
+
+    store.add_channel("ch", "t")
+    store.upsert_post(1, "ch", "5", "key-pool", "текст", 1, 1, 0)
+    qid = store.qid_by_key("key-pool")
+    store.set_ru_text(qid, "✅ **Пост**")
+
+    sent, edits = [], []
+
+    async def fake_send(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs.get("reply_markup")))
+        return type("M", (), {"message_id": 900})()
+
+    async def fake_edit(text, chat_id, message_id, parse_mode=None):
+        edits.append((chat_id, message_id, text))
+
+    monkeypatch.setattr(bot.bot, "send_message", fake_send)
+    monkeypatch.setattr(bot.bot, "edit_message_text", fake_edit)
+
+    user = type("U", (), {"username": "ed", "first_name": "Ed"})()
+    assert asyncio.run(bot._send_to_pool(qid, user)) is True
+    assert sent and sent[0][0] == 777
+    assert sent[0][2] is None  # в чате отбора кнопок модерации быть не должно
+    assert any(chat_id == 777 and msg_id == 900
+               for chat_id, msg_id, _kind in store.cards_for_qid(qid))
+
+    verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND)])
+    asyncio.run(bot.note_verdict(qid, verdict))
+    pool_messages = [text for chat_id, text, _ in sent[1:] if chat_id == 777]
+    assert pool_messages, "в чате отбора должна появиться метка ответом на копию"
+    assert any("не подтверждено" in text.lower() for text in pool_messages)
+
+
+def test_album_gets_single_label_in_pool(monkeypatch):
+    from app.bot import AdminBot
+    from app.store import Store
+
+    settings = Settings(bot_token="123456789:AA" + "x" * 33, fc_mode="on",
+                        approval_chat_id="777")
+    store = Store(":memory:")
+    bot = AdminBot(store, None, {1}, settings=settings, fc_repo=None)
+    store.add_channel("ch", "t")
+    store.upsert_post(1, "ch", "5", "key-album", "текст", 1, 1, 1)
+    qid = store.qid_by_key("key-album")
+    store.set_ru_text(qid, "✅ **Пост**")
+    store.remember_fileids("key-album", '[{"kind": "photo", "id": "f1"},'
+                                        ' {"kind": "video", "id": "f2"}]')
+
+    sent = []
+    counter = {"n": 0}
+
+    def _msg():
+        counter["n"] += 1
+        return type("M", (), {"message_id": counter["n"]})()
+
+    async def fake_media_group(chat_id, media):
+        return [_msg(), _msg()]
+
+    async def fake_send(chat_id, text, **kwargs):
+        sent.append((chat_id, text, kwargs))
+        return _msg()
+
+    async def fake_edit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(bot.bot, "send_media_group", fake_media_group)
+    monkeypatch.setattr(bot.bot, "send_message", fake_send)
+    monkeypatch.setattr(bot.bot, "edit_message_text", fake_edit)
+
+    asyncio.run(bot._deliver(777, "key-album", "body", qid=qid, with_markup=False))
+    kinds = sorted(kind for _c, _m, kind in store.cards_for_qid(qid))
+    assert kinds == ["media", "media", "text"]
+
+    verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND)])
+    asyncio.run(bot.note_verdict(qid, verdict))
+    labels = [text for chat_id, text, _ in sent if chat_id == 777
+              and "не подтверждено" in text.lower()]
+    assert len(labels) == 1, "метка должна быть одна, а не по одной на каждое медиа"
+
+
+def test_job_tier_is_preserved(tmp_path):
+    _con, repo = _repo_with_post(tmp_path)
+    repo.enqueue(1, "t2")
+    assert repo.claim_next() == 1
+    assert repo.job_tier(1) == "t2"

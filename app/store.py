@@ -54,12 +54,16 @@ class Store:
         c.execute("CREATE TABLE IF NOT EXISTS last_seen(ch TEXT PRIMARY KEY, mid INTEGER)")
         c.execute("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT)")
         c.execute("""CREATE TABLE IF NOT EXISTS cards(
-            chat_id INTEGER, msg_id INTEGER, qid INTEGER, PRIMARY KEY(chat_id, msg_id))""")
+            chat_id INTEGER, msg_id INTEGER, qid INTEGER, kind TEXT DEFAULT 'text',
+            PRIMARY KEY(chat_id, msg_id))""")
         c.execute("CREATE INDEX IF NOT EXISTS idx_posts_state ON posts(state, ts)")
         # миграции живых БД
         pcols = {r[1] for r in c.execute("PRAGMA table_info(posts)")}
         if "ru_text" not in pcols:
             c.execute("ALTER TABLE posts ADD COLUMN ru_text TEXT")
+        card_cols = {r[1] for r in c.execute("PRAGMA table_info(cards)")}
+        if "kind" not in card_cols:
+            c.execute("ALTER TABLE cards ADD COLUMN kind TEXT DEFAULT 'text'")
         ccols = {r[1] for r in c.execute("PRAGMA table_info(channels)")}
         if "subs" not in ccols:
             c.execute("ALTER TABLE channels ADD COLUMN subs INTEGER DEFAULT 0")
@@ -207,9 +211,13 @@ class Store:
         row = self.con.execute("SELECT qid FROM posts WHERE key=?", (key,)).fetchone()
         return int(row[0]) if row else None
 
-    def cards_for_qid(self, qid) -> list[tuple[int, int]]:
+    def state_by_key(self, key) -> str | None:
+        row = self.con.execute("SELECT state FROM posts WHERE key=?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def cards_for_qid(self, qid) -> list[tuple[int, int, str]]:
         return self.con.execute(
-            "SELECT chat_id, msg_id FROM cards WHERE qid=?", (qid,)).fetchall()
+            "SELECT chat_id, msg_id, kind FROM cards WHERE qid=?", (qid,)).fetchall()
 
     def mark_dead(self, qid):
         with self.lock:
@@ -223,10 +231,11 @@ class Store:
             self.con.commit()
 
     # ---------- карточки выданных постов (для кнопок) ----------
-    def map_card(self, chat_id, msg_id, qid):
+    def map_card(self, chat_id, msg_id, qid, kind="text"):
         with self.lock:
-            self.con.execute("INSERT OR IGNORE INTO cards(chat_id, msg_id, qid) VALUES(?,?,?)",
-                             (chat_id, msg_id, qid))
+            self.con.execute(
+                "INSERT OR IGNORE INTO cards(chat_id, msg_id, qid, kind) VALUES(?,?,?,?)",
+                (chat_id, msg_id, qid, kind))
             self.con.commit()
 
     def card_qid(self, chat_id, msg_id):

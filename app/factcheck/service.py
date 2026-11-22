@@ -223,7 +223,8 @@ class FactCheckService:
                 if not text:
                     self.repo.finish(qid, "skipped")
                     continue
-                verdict = await self.check_text(text, qid=qid, tier="t1",
+                tier = self.repo.job_tier(qid) or "t1"
+                verdict = await self.check_text(text, qid=qid, tier=tier,
                                                 post_ts=self.repo.post_ts(qid))
                 self.repo.save(qid, verdict, version=self.prompts.version())
                 self.repo.finish(qid, "done")

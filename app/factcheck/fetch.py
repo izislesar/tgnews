@@ -273,5 +273,8 @@ class HttpFetcher:
                 except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
                     print(f"[fc.fetch] {type(exc).__name__} {current[:80]}")
                     return None
-                return extract_document(current, raw, min_text=self.min_text)
+                # trafilatura/lxml — CPU-bound: в отдельный поток, иначе блокируем
+                # event loop бота (Telegram polling и таймеры встают)
+                return await asyncio.to_thread(extract_document, current, raw,
+                                               min_text=self.min_text)
             return None
