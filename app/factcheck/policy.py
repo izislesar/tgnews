@@ -77,6 +77,7 @@ PUBLISHER_GROUPS: dict[str, str] = {
     "cbc.ca": "media-west",
     "abc.net.au": "media-west",
     "larazon.es": "media-west",
+    "abcnews.com": "media-west",
     # региональные агентства и СМИ
     "aa.com.tr": "agencies-regional",
     "trt.net.tr": "tr-state",
@@ -117,6 +118,11 @@ PUBLISHER_GROUPS: dict[str, str] = {
     "tvrain.tv": "ru-independent",
     "echo.msk.ru": "ru-independent",
     "theins.ru": "ru-independent",
+    "rosbalt.ru": "ru-private",
+    "ura.news": "ru-private",
+    "www1.ru": "ru-private",
+    "3dnews.ru": "media-tech",
+    "notebookcheck-ru.com": "media-tech",
     # украинские
     "ukrinform.ua": "ua-state",
     "kyivindependent.com": "ua-media",
@@ -129,6 +135,11 @@ PUBLISHER_GROUPS: dict[str, str] = {
     "lb.ua": "ua-media",
     "zn.ua": "ua-media",
     "eurointegration.com.ua": "ua-media",
+    "glavcom.ua": "ua-media",
+    "korrespondent.net": "ua-media",
+    "focus.ua": "ua-media",
+    "ua.news": "ua-media",
+    "news.telegraf.com.ua": "ua-media",
     "mil.gov.ua": "ua-official",
     "president.gov.ua": "ua-official",
     "armyinform.com.ua": "ua-official",
@@ -191,7 +202,7 @@ NON_CONFIRMING_GROUPS = {"reference", "other"}  # незнакомый доме�
 INDEPENDENT_GROUPS = {
     "agencies-west", "agencies-regional", "media-west", "media-asia",
     "regional-media", "ru-private", "ru-independent", "ua-media",
-    "by-media", "ca-media", "analysis",
+    "by-media", "ca-media", "analysis", "media-tech",
 }
 STATE_OR_OFFICIAL_GROUPS = {
     "ru-state", "ua-state", "cn-state", "tr-state",
@@ -255,6 +266,12 @@ def independent_evidence_groups(verdict: ClaimVerdict) -> set[str]:
     return independent_groups(verdict.evidence) & INDEPENDENT_GROUPS
 
 
+def independent_evidence_domains(verdict: ClaimVerdict) -> set[str]:
+    """Разные независимые ИЗДАНИЯ. Две редакции внутри одной группы — тоже два источника."""
+    return {evidence.domain for evidence in verdict.evidence
+            if evidence.domain and evidence.publisher_group in INDEPENDENT_GROUPS}
+
+
 def correction_eligible(verdict: ClaimVerdict, *, min_confidence: float = 0.8) -> bool:
     """Можно ли править факт по этому утверждению.
 
@@ -269,15 +286,16 @@ def correction_eligible(verdict: ClaimVerdict, *, min_confidence: float = 0.8) -
         return False
     if verdict.confidence < min_confidence:
         return False
-    groups = independent_evidence_groups(verdict)
-    if not groups:
+    domains = independent_evidence_domains(verdict)
+    if not domains:
         return False
     if verdict.claim.ctype in (ClaimType.ATTRIBUTED, ClaimType.QUOTE):
         return True
-    # числа/даты/события: агентство или минимум две независимые группы
-    if groups & SUFFICIENT_SINGLE_GROUPS:
+    # числа/даты/события: достаточно агентства или двух разных независимых изданий
+    if any(evidence.publisher_group in SUFFICIENT_SINGLE_GROUPS
+           for evidence in verdict.evidence if evidence.domain in domains):
         return True
-    return len(groups) >= MIN_GROUPS
+    return len(domains) >= 2
 
 
 def eligible_corrections(verdict: PostVerdict, *, min_confidence: float = 0.8) -> list[ClaimVerdict]:

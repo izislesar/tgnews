@@ -824,9 +824,15 @@ def test_correction_allows_single_independent_agency():
 
 def test_correction_needs_two_media_without_agency():
     assert policy.correction_eligible(_refuted_verdict(("bbc.com",)),
-                                      min_confidence=0.8) is False
+                                      min_confidence=0.7) is False
     assert policy.correction_eligible(_refuted_verdict(("bbc.com", "meduza.io")),
-                                      min_confidence=0.8) is True
+                                      min_confidence=0.7) is True
+
+
+def test_correction_counts_two_outlets_of_same_group():
+    # BBC и Guardian — разные редакции, хотя группа одна
+    assert policy.correction_eligible(_refuted_verdict(("bbc.com", "theguardian.com")),
+                                      min_confidence=0.7) is True
 
 
 def test_correction_ignores_weakly_supported_claim():
