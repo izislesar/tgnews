@@ -320,6 +320,12 @@ systemctl daemon-reload && systemctl enable --now tgnews-backup.timer
 **Откат.** `git reset --hard <предыдущий-коммит> && docker compose up -d --build`
 на сервере; для отключения только фактчекинга — `FC_ENABLED=off` и рестарт `app`.
 
+**Безопасность.** Контейнер `app` работает под non-root (`uid 1000`), поэтому
+`data/` должен принадлежать `1000:1000`: `chown -R 1000:1000 data`. Приватный
+deploy-ключ вынесен из тома приложения (`/root/keys-backup`), `.env` — `0600 root`.
+Секреты в образ не попадают, `prompt.txt` берётся из образа, но может быть перекрыт
+bind-mount'ом.
+
 **Диагностика.** `docker compose logs --since 1h app | grep '\[fc'` — прогресс,
 `[fc.fetch] HTTP 403` у отдельных доменов нормален (антибот), `[fc] цикл qid=…` —
 единичные ошибки, после 3 попыток задача уходит в `error` и админам приходит алерт.
