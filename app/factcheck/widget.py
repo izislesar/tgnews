@@ -59,11 +59,13 @@ def render_widget(verdict: PostVerdict, *, limit: int = 10) -> str | None:
     if verdict.degraded:
         return "🔎 <b>Фактчекинг</b>: проверка не завершилась (поиск/загрузка недоступны)"
 
+    reviewed = max((item.coverage for item in verdict.claims
+                    if item.claim.is_core), default=0)
     header = "🔎 <b>Фактчекинг</b>"
     if score is None:
-        header += f": недостаточно данных · источников: {len(sources)}"
+        header += f": недостаточно данных · источников: {reviewed or len(sources)}"
     else:
-        header += f": <b>{round(score * 100)}%</b> · источников: {len(sources)}"
+        header += f": <b>{round(score * 100)}%</b> · источников: {reviewed or len(sources)}"
     lines = [header]
 
     counts: dict[Status, int] = {}

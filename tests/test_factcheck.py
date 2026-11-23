@@ -558,9 +558,9 @@ def test_body_keeps_post_clean_and_tags_low_correctness():
     assert "не подтверждено" not in clean.lower()
     assert "Низкая корректность" not in clean
 
-    bad = PostVerdict(status=Status.NOT_FOUND, claims=[
-        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
-                     coverage=5)])
+    bad = PostVerdict(status=Status.REFUTED, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.REFUTED,
+                     confidence=0.9, coverage=5)])
     assert "Низкая корректность" in bot._body(post, bad)
 
 
@@ -612,9 +612,9 @@ def test_note_verdict_edits_card_and_sends_widget(monkeypatch):
     monkeypatch.setattr(bot.bot, "edit_message_text", fake_edit)
     monkeypatch.setattr(bot.bot, "send_message", fake_send)
 
-    verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
-        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
-                     coverage=6,
+    verdict = PostVerdict(qid=qid, status=Status.REFUTED, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.REFUTED,
+                     confidence=0.9, coverage=6,
                      evidence=[evidence_for("reuters.com")])])
     asyncio.run(bot.note_verdict(qid, verdict))
 
@@ -746,9 +746,9 @@ def test_pool_copy_gets_tag_reply_and_widget(monkeypatch):
     assert sent and sent[0][0] == 777
     assert sent[0][2].get("reply_markup") is None  # без кнопок модерации
 
-    verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
-        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
-                     coverage=6, evidence=[evidence_for("reuters.com")])])
+    verdict = PostVerdict(qid=qid, status=Status.REFUTED, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.REFUTED,
+                     confidence=0.9, coverage=6, evidence=[evidence_for("reuters.com")])])
     asyncio.run(bot.note_verdict(qid, verdict))
 
     pool_texts = [text for chat_id, text, _kw in sent if chat_id == 777]
@@ -798,9 +798,10 @@ def test_album_gets_single_label_in_pool(monkeypatch):
     kinds = sorted(kind for _c, _m, kind in store.cards_for_qid(qid))
     assert kinds == ["media", "media", "text", "widget"]
 
-    verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
-        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
-                     coverage=5)])
+    verdict = PostVerdict(qid=qid, status=Status.REFUTED, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.REFUTED,
+                     confidence=0.9, coverage=6,
+                     evidence=[evidence_for("reuters.com")])])
     asyncio.run(bot.note_verdict(qid, verdict))
     widgets = [text for chat_id, text, _ in sent if chat_id == 777
                and "Фактчекинг" in text]
@@ -1148,9 +1149,11 @@ def test_widget_shows_score_sources_and_mismatch():
     bad = ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
                        coverage=6, note="источники называют 12",
                        evidence=[evidence_for("reuters.com")])
-    text = render_widget(PostVerdict(qid=1, claims=[ok, bad]))
+    part = ClaimVerdict(claim=core_claim("Удар был в четверг", ctype=ClaimType.DATE),
+                        status=Status.PARTIAL, confidence=0.8, coverage=6)
+    text = render_widget(PostVerdict(qid=1, claims=[ok, bad, part]))
     assert "Фактчекинг" in text
-    assert "50%" in text
+    assert "75%" in text
     assert "reuters.com" in text and "bbc.com" in text
     assert "Что не совпало" in text
     assert "12" in text
@@ -1163,7 +1166,7 @@ def test_widget_marks_insufficient_coverage_without_mismatch():
                         coverage=2)
     text = render_widget(PostVerdict(qid=1, claims=[weak]))
     assert "недостаточно данных" in text
-    assert "вывод не делался" in text
+    assert "источников" in text
     assert "Что не совпало" not in text
 
 
