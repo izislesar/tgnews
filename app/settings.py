@@ -90,13 +90,13 @@ class Settings:
     searx_url: str = "http://searxng:8080"
     searx_timeout: float = 20.0
     search_concurrency: int = 2
-    search_results: int = 12
+    search_results: int = 15
     searx_fallback_engines: str = "bing"
 
     # --- загрузка страниц ---
     fetch_timeout: float = 12.0
     fetch_max_bytes: int = 2_000_000
-    fetch_concurrency: int = 2
+    fetch_concurrency: int = 3
     fetch_min_interval: float = 1.0  # вежливость: не чаще 1 запроса/сек на хост
     user_agent: str = DEFAULT_USER_AGENT
 
@@ -104,15 +104,17 @@ class Settings:
     fc_mode: str = "off"  # off | shadow | on
     fc_cycles: int = 2
     fc_max_claims: int = 6
-    fc_deadline_s: float = 90.0
+    fc_deadline_s: float = 120.0
     fc_calls_per_post: int = 12
     fc_judge_concurrency: int = 3
-    fc_top_hits: int = 4
-    fc_snippets_per_claim: int = 3
+    fc_top_hits: int = 8
+    fc_snippets_per_claim: int = 4
     fc_min_text: int = 200
     fc_local_timeout: float = 8.0
     fc_fix_facts: bool = False   # вариант 2: переписывать пост под данные источников
     fc_fix_min_conf: float = 0.7
+    fc_max_queries: int = 5
+    fc_min_coverage: int = 3   # меньше — «недостаточно источников», без метки
     fc_daily_calls: int = 600     # предохранитель по расходам на LLM в сутки
     fc_retention_days: int = 14   # сколько хранить запуски/evidence/задачи
     fc_claim_model: str = ""  # пусто -> fallback_model (дешёвая модель)
@@ -177,6 +179,8 @@ class Settings:
             fc_local_timeout=_float(env, "FC_LOCAL_TIMEOUT", defaults.fc_local_timeout),
             fc_fix_facts=_bool(env, "FC_FIX_FACTS", defaults.fc_fix_facts),
             fc_fix_min_conf=_float(env, "FC_FIX_MIN_CONF", defaults.fc_fix_min_conf),
+            fc_max_queries=_int(env, "FC_MAX_QUERIES", defaults.fc_max_queries),
+            fc_min_coverage=_int(env, "FC_MIN_COVERAGE", defaults.fc_min_coverage),
             fc_daily_calls=_int(env, "FC_DAILY_CALLS", defaults.fc_daily_calls),
             fc_retention_days=_int(env, "FC_RETENTION_DAYS", defaults.fc_retention_days),
             fc_claim_model=_get(env, "FC_CLAIM_MODEL", defaults.fc_claim_model)

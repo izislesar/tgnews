@@ -44,6 +44,8 @@ class Claim(BaseModel):
     entities: list[str] = Field(default_factory=list)
     numbers: list[str] = Field(default_factory=list)
     lang: str | None = None
+    # поисковые запросы, которые пишет сама модель (EN / оригинал / RU)
+    search_queries: list[str] = Field(default_factory=list)
 
     @property
     def claim_key(self) -> str:
@@ -117,7 +119,8 @@ class ClaimVerdict(BaseModel):
     queries: list[str] = Field(default_factory=list)
     cycles: int = 0
     error: str | None = None
-    corrected: bool = False  # факт исправлен в тексте, метка по нему не нужна
+    corrected: bool = False
+    coverage: int = 0  # сколько разных доменов реально просмотрено  # факт исправлен в тексте, метка по нему не нужна
 
     @property
     def groups(self) -> set[str]:

@@ -53,12 +53,21 @@ def _short(text: str, words: int = 10) -> str:
 
 
 def build_initial(claim: Claim, *, post_ts: float | None = None,
-                  max_queries: int = 3) -> list[Query]:
-    """1-3 запроса: сущности+числа, точная фраза, язык оригинала."""
-    lang = _lang(claim)
-    tr = _time_range(post_ts)
-    queries: list[Query] = []
+                  max_queries: int = 5) -> list[Query]:
+    """Запросы от модели (EN/оригинал/RU) + эвристический фолбэк.
 
+    Язык не задаём: SearXNG сам подберёт движки, а запросы уже написаны на нужных
+    языках — так находится больше независимых источников.
+    """
+    tr = _time_range(post_ts)
+    queries: list[Query] = [
+        Query(text=text, language=None, time_range=tr)
+        for text in claim.search_queries[:max_queries]
+    ]
+    if len(queries) >= max_queries:
+        return _dedupe(queries)
+
+    lang = _lang(claim)
     anchor = " ".join([*claim.entities[:3], *claim.numbers[:2]]).strip()
     if not anchor:
         anchor = _keywords(claim.text) or _short(claim.text, 12)

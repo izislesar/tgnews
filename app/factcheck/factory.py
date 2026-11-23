@@ -28,6 +28,7 @@ def build_service(
     prompts: Prompts | None = None,
     llm: LlmClient | None = None,
 ) -> tuple[FactCheckService, LlmClient]:
+    policy.configure(min_coverage=settings.fc_min_coverage)
     prompts = prompts or build_prompts(settings)
     llm = llm or build_llm(settings)
     service = FactCheckService(

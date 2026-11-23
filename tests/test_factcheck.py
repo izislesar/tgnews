@@ -202,11 +202,11 @@ def test_aggregate_takes_worst_core_status():
 # ---------- дисклеймер ----------
 def test_disclaimer_only_for_core_claims():
     core_bad = ClaimVerdict(claim=core_claim("Погибли 29 человек"),
-                            status=Status.NOT_FOUND)
+                            status=Status.NOT_FOUND, coverage=3)
     secondary_bad = ClaimVerdict(
         claim=Claim(idx=1, text="подробности", ctype=ClaimType.EVENT,
                     priority=Priority.SECONDARY),
-        status=Status.NOT_FOUND)
+        status=Status.NOT_FOUND, coverage=3)
     verdict = PostVerdict(status=Status.NOT_FOUND, claims=[core_bad, secondary_bad])
     text = verdict.disclaimer
     assert text and "не подтверждено" in text.lower()
@@ -226,7 +226,7 @@ def test_disclaimer_none_when_all_core_supported():
 def test_disclaimer_refuted_wording():
     verdict = PostVerdict(status=Status.REFUTED, claims=[
         ClaimVerdict(claim=core_claim("Погибли 300 человек"), status=Status.REFUTED,
-                     confidence=0.95)
+                     confidence=0.95, coverage=3)
     ])
     assert "опровергают" in (verdict.disclaimer or "")
 
@@ -553,7 +553,8 @@ def test_body_appends_disclaimer():
     assert "не подтверждено" not in bot._body(post, None).lower()
 
     verdict = PostVerdict(status=Status.NOT_FOUND, claims=[
-        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND)])
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
+                     coverage=3)])
     body = bot._body(post, verdict)
     assert "t.me/ch/10" in body
     assert "не подтверждено" in body.lower()
@@ -607,7 +608,8 @@ def test_note_verdict_edits_cards(monkeypatch):
     monkeypatch.setattr(bot.bot, "edit_message_text", fake_edit)
     monkeypatch.setattr(bot.bot, "send_message", fake_send)
     verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
-        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND)])
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
+                     coverage=3)])
     asyncio.run(bot.note_verdict(qid, verdict))
 
     assert calls, "карточка должна обновиться"
@@ -686,7 +688,8 @@ def test_note_verdict_ignores_undelivered(monkeypatch):
     monkeypatch.setattr(bot.bot, "edit_message_text", fake_edit)
     monkeypatch.setattr(bot.bot, "send_message", fake_send)
     verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
-        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND)])
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
+                     coverage=3)])
     asyncio.run(bot.note_verdict(qid, verdict))
     assert calls == []  # карточку админ ещё не получал — не шумим
 
@@ -742,7 +745,8 @@ def test_pool_copy_updates_after_late_verdict(monkeypatch):
                for chat_id, msg_id, _kind in store.cards_for_qid(qid))
 
     verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
-        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND)])
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
+                     coverage=3)])
     asyncio.run(bot.note_verdict(qid, verdict))
     pool_messages = [text for chat_id, text, _ in sent[1:] if chat_id == 777]
     assert pool_messages, "в чате отбора должна появиться метка ответом на копию"
@@ -790,7 +794,8 @@ def test_album_gets_single_label_in_pool(monkeypatch):
     assert kinds == ["media", "media", "text"]
 
     verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
-        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND)])
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
+                     coverage=3)])
     asyncio.run(bot.note_verdict(qid, verdict))
     labels = [text for chat_id, text, _ in sent if chat_id == 777
               and "не подтверждено" in text.lower()]
@@ -1049,3 +1054,67 @@ def test_job_state_transitions(tmp_path):
     assert repo.job_state(1) == "retry"
     repo.finish(1, "error")
     assert repo.job_state(1) == "error"
+
+
+# ---------- покрытие источников ----------
+def test_disclaimer_suppressed_when_coverage_is_low():
+    low = PostVerdict(status=Status.NOT_FOUND, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
+                     coverage=2)])
+    ok = PostVerdict(status=Status.NOT_FOUND, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
+                     coverage=3)])
+    assert low.disclaimer is None      # источников мало — вывода не делаем
+    assert ok.disclaimer is not None
+
+
+def test_claims_carry_ai_queries():
+    payload = {"claims": [{
+        "text": "Российский корвет Меркурий затонул в порту Бенгази",
+        "ctype": "event", "priority": "core", "entities": ["Меркурий", "Бенгази"],
+        "numbers": [], "lang": "en",
+        "queries": ["Russian corvette Mercury sank Benghazi port",
+                    "корвет Меркурий затонул Бенгази",
+                    "Mercury corvette explosion Libya"]}]}
+    extractor = ClaimExtractor(FakeLlm(payload), FakePrompts(), max_claims=3)
+    claims = asyncio.run(extractor.extract("текст"))
+    assert len(claims[0].search_queries) == 3
+    assert claims[0].search_queries[0].startswith("Russian corvette")
+
+
+def test_initial_queries_prefer_ai_written():
+    claim = core_claim("Корвет затонул")
+    claim.search_queries = ["Russian corvette sank Benghazi", "корвет затонул Бенгази"]
+    queries = build_initial(claim, max_queries=5)
+    texts = [q.text for q in queries]
+    assert texts[0] == "Russian corvette sank Benghazi"
+    assert "корвет затонул Бенгази" in texts
+
+
+def test_service_records_source_coverage():
+    claim = core_claim("Дроновые атаки почти вдвое снизили нефтепереработку в России",
+                       ctype=ClaimType.EVENT, numbers=())
+    hits = [Hit(url="https://www.reuters.com/a", title="R"),
+            Hit(url="https://www.bbc.com/b", title="B"),
+            Hit(url="https://meduza.io/c", title="M")]
+    docs = {
+        "https://www.reuters.com/a": Document(url="https://www.reuters.com/a",
+                                              text="Drone attacks nearly halved refining."),
+        "https://www.bbc.com/b": Document(url="https://www.bbc.com/b",
+                                          text="Drone strikes nearly halved refining."),
+        "https://meduza.io/c": Document(url="https://meduza.io/c",
+                                        text="Атаки дронов снизили переработку."),
+    }
+    judge = FakeJudge([ClaimVerdict(claim=claim, status=Status.NOT_FOUND, note="мало")])
+    service = _service(make_settings(fc_top_hits=3), CLAIM_PAYLOAD, hits, docs, judge)
+    verdict = asyncio.run(service.check_text("текст", tier="t1"))
+    assert verdict.claims[0].coverage >= 3
+
+
+def test_repo_persists_coverage(tmp_path):
+    _con, repo = _repo_with_post(tmp_path)
+    repo.save(1, PostVerdict(qid=1, status=Status.NOT_FOUND, claims=[
+        ClaimVerdict(claim=core_claim(), status=Status.NOT_FOUND, coverage=5)]),
+        version="v")
+    loaded = repo.load(1)
+    assert loaded.claims[0].coverage == 5

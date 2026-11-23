@@ -17,7 +17,8 @@ CLAIMS_SCHEMA: dict = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["text", "ctype", "priority", "entities", "numbers", "lang"],
+                "required": ["text", "ctype", "priority", "entities", "numbers", "lang",
+                             "queries"],
                 "properties": {
                     "text": {"type": "string"},
                     "ctype": {"type": "string", "enum": [c.value for c in ClaimType]},
@@ -25,6 +26,7 @@ CLAIMS_SCHEMA: dict = {
                     "entities": {"type": "array", "items": {"type": "string"}},
                     "numbers": {"type": "array", "items": {"type": "string"}},
                     "lang": {"type": "string"},
+                    "queries": {"type": "array", "items": {"type": "string"}},
                 },
             },
         }
@@ -130,6 +132,11 @@ class ClaimExtractor:
                     entities=[str(e)[:80] for e in (item.get("entities") or [])][:8],
                     numbers=numbers,
                     lang=str(item.get("lang") or "")[:8] or None,
+                    search_queries=[
+                        " ".join(str(q).split())[:200]
+                        for q in (item.get("queries") or [])
+                        if len(str(q).strip()) >= 8
+                    ][:6],
                 )
             )
         return claims

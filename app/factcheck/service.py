@@ -109,11 +109,24 @@ class FactCheckService:
 
         cycles = 1 if tier == "t1" else max(1, self.settings.fc_cycles)
         semaphore = asyncio.Semaphore(max(1, self.settings.fc_judge_concurrency))
+        # один и тот же URL не качаем дважды, даже если он выпал по разным утверждениям
+        doc_cache: dict[str, asyncio.Task] = {}
+
+        async def fetch_doc(url: str):
+            task = doc_cache.get(url)
+            if task is None:
+                task = asyncio.create_task(self.fetcher.fetch(url))
+                doc_cache[url] = task
+            try:
+                return await task
+            except Exception:
+                return None
 
         async def run(claim: Claim) -> ClaimVerdict:
             async with semaphore:
                 try:
-                    return await self._check_claim(claim, cycles, deadline, budget, post_ts)
+                    return await self._check_claim(claim, cycles, deadline, budget, post_ts,
+                                                   fetch_doc)
                 except BudgetExceeded as exc:
                     return ClaimVerdict(claim=claim, status=Status.NOT_FOUND, error=str(exc))
                 except Exception as exc:  # одна упавшая проверка не роняет пост
@@ -174,9 +187,12 @@ class FactCheckService:
         deadline: float,
         budget: Budget,
         post_ts: float | None,
+        fetch_doc=None,
     ) -> ClaimVerdict:
-        queries = query_mod.build_initial(claim, post_ts=post_ts)
+        queries = query_mod.build_initial(claim, post_ts=post_ts,
+                                          max_queries=self.settings.fc_max_queries)
         seen_urls: set[str] = set()
+        consulted: set[str] = set()
         best: ClaimVerdict | None = None
 
         for cycle in range(1, cycles + 1):
@@ -208,17 +224,19 @@ class FactCheckService:
                 break
 
             seen_urls.update(hit.url for hit in hits)
-            docs = await asyncio.gather(*(self.fetcher.fetch(hit.url) for hit in hits),
-                                        return_exceptions=True)
+            fetcher = fetch_doc or self.fetcher.fetch
+            docs = await asyncio.gather(*(fetcher(hit.url) for hit in hits))
             snippets: list[Snippet] = []
             for hit, doc in zip(hits, docs):
                 if isinstance(doc, Document):
+                    consulted.add(domain_of(hit.url))  # страницу прочитали
                     snippets.extend(select_snippets(doc, claim,
                                                     k=self.settings.fc_snippets_per_claim))
                 elif hit.snippet:
                     snippets.append(Snippet(url=hit.url, domain=domain_of(hit.url),
                                             quote=hit.snippet, title=hit.title,
                                             published=hit.published))
+            consulted.update(snippet.domain for snippet in snippets)
             snippets = _dedupe_snippets(snippets)[: self.settings.fc_snippets_per_claim * 2]
             if not snippets:
                 best = best or ClaimVerdict(claim=claim, status=Status.NOT_FOUND,
@@ -239,7 +257,9 @@ class FactCheckService:
                 break
             queries = query_mod.refine(claim, verdict, cycle)
 
-        return best or ClaimVerdict(claim=claim, status=Status.NOT_FOUND, note="не проверено")
+        result = best or ClaimVerdict(claim=claim, status=Status.NOT_FOUND, note="не проверено")
+        result.coverage = len(consulted)
+        return result
 
     # ---------- обслуживание ----------
     def _maintain(self) -> None:

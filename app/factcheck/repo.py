@@ -26,7 +26,7 @@ CREATE INDEX IF NOT EXISTS idx_fc_jobs_state ON fc_jobs(state, next_try);
 CREATE TABLE IF NOT EXISTS claims(
     qid INTEGER, idx INTEGER, claim_key TEXT, text TEXT, ctype TEXT, priority TEXT,
     status TEXT, confidence REAL, note TEXT, cycles INTEGER, error TEXT,
-    corrected INTEGER DEFAULT 0,
+    corrected INTEGER DEFAULT 0, coverage INTEGER DEFAULT 0,
     PRIMARY KEY(qid, idx)
 );
 CREATE TABLE IF NOT EXISTS evidence(
@@ -67,6 +67,8 @@ class FactcheckRepo:
             claim_cols = {row[1] for row in self.con.execute("PRAGMA table_info(claims)")}
             if "corrected" not in claim_cols:
                 self.con.execute("ALTER TABLE claims ADD COLUMN corrected INTEGER DEFAULT 0")
+            if "coverage" not in claim_cols:
+                self.con.execute("ALTER TABLE claims ADD COLUMN coverage INTEGER DEFAULT 0")
             columns = {row[1] for row in self.con.execute("PRAGMA table_info(posts)")}
             for name, sql_type in _POST_COLUMNS.items():
                 if name not in columns:
@@ -170,12 +172,12 @@ class FactcheckRepo:
             for item in verdict.claims:
                 self.con.execute(
                     "INSERT OR REPLACE INTO claims(qid, idx, claim_key, text, ctype, priority, "
-                    "status, confidence, note, cycles, error, corrected) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "status, confidence, note, cycles, error, corrected, coverage) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (qid, item.claim.idx, item.claim.claim_key, item.claim.text,
                      item.claim.ctype.value, item.claim.priority.value, item.status.value,
                      item.confidence, item.note, item.cycles, item.error,
-                     int(item.corrected)),
+                     int(item.corrected), int(item.coverage)),
                 )
                 for evidence in item.evidence:
                     self.con.execute(
@@ -199,12 +201,12 @@ class FactcheckRepo:
             return None
         claims_rows = self.con.execute(
             "SELECT idx, text, ctype, priority, status, confidence, note, cycles, error, "
-            "corrected FROM claims WHERE qid=? ORDER BY idx",
+            "corrected, coverage FROM claims WHERE qid=? ORDER BY idx",
             (qid,),
         ).fetchall()
         claims: list[ClaimVerdict] = []
         for (idx, text, ctype, priority, status, confidence, note, cycles, error,
-             corrected) in claims_rows:
+             corrected, coverage) in claims_rows:
             claim = Claim(
                 idx=idx, text=text,
                 ctype=ClaimType(ctype or "event"),
@@ -228,6 +230,7 @@ class FactcheckRepo:
                     error=error,
                     evidence=evidence,
                     corrected=bool(corrected),
+                    coverage=int(coverage or 0),
                 )
             )
         corrections = []

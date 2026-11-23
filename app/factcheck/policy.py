@@ -211,6 +211,9 @@ STATE_OR_OFFICIAL_GROUPS = {
 
 MIN_CONFIDENCE = 0.7
 MIN_GROUPS = 2
+# Вывод по «не подтверждено» делаем только если реально просмотрели достаточно
+# разных доменов. Иначе это не вердикт, а «мы почти не смотрели».
+MIN_COVERAGE = 3
 # Одного сообщения агентства достаточно: это отраслевая норма и не плодит
 # «не подтверждено» на каждом реальном событии.
 SUFFICIENT_SINGLE_GROUPS = {"agencies-west", "agencies-regional"}
@@ -230,6 +233,12 @@ _DISCLAIMER = {
     Status.NOT_FOUND: "⚠️ По открытым источникам не подтверждено: {claims}",
     Status.PARTIAL: "⚠️ Подтверждено частично: {claims}",
 }
+
+
+def configure(*, min_coverage: int | None = None) -> None:
+    global MIN_COVERAGE
+    if min_coverage is not None:
+        MIN_COVERAGE = max(0, int(min_coverage))
 
 
 def publisher_group(domain: str) -> str:
@@ -354,6 +363,8 @@ def labeled_claims(verdict: PostVerdict) -> list[ClaimVerdict]:
             continue
         if item.corrected or effective_status(item) is Status.SUPPORTED:
             continue
+        if item.coverage < MIN_COVERAGE:
+            continue  # источников слишком мало — метку не ставим
         out.append(item)
     return out
 

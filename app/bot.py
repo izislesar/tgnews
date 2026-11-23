@@ -16,6 +16,7 @@ from aiogram.types import (Message, CallbackQuery, BotCommand,
 from telethon import functions
 
 from . import llm
+from .factcheck import policy
 from .factcheck.models import PostVerdict, Status
 from .settings import Settings
 
@@ -514,7 +515,8 @@ class AdminBot:
             marker = markers.get(item.status.value, "•")
             ctype = TYPE_RU.get(item.claim.ctype.value, item.claim.ctype.value)
             priority = PRIORITY_RU.get(item.claim.priority.value, item.claim.priority.value)
-            lines.append(f"{marker} <i>{ctype} · {priority}</i> "
+            coverage = f" · источников: {item.coverage}" if item.coverage else ""
+            lines.append(f"{marker} <i>{ctype} · {priority}{coverage}</i> "
                          f"{html.escape(item.claim.text[:160])}")
             if item.error:
                 lines.append(f"    <i>{html.escape(item.error[:120])}</i>")
@@ -530,6 +532,11 @@ class AdminBot:
                 domain = urlparse(item.source_url).netloc
                 lines.append(f"• {html.escape(item.old[:70])} → "
                              f"{html.escape(item.new[:70])} <i>({html.escape(domain)})</i>")
+        if any(not item.corrected and item.coverage < policy.MIN_COVERAGE
+               and item.status is not Status.SUPPORTED for item in verdict.claims):
+            lines.append("")
+            lines.append(f"ℹ️ По части утверждений просмотрено меньше "
+                         f"{policy.MIN_COVERAGE} источников — вывод не делаем, метки нет.")
         if verdict.degraded:
             lines.append("")
             lines.append("⚠️ Проверка не завершилась: поиск/загрузка были недоступны. "
