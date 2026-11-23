@@ -1118,3 +1118,13 @@ def test_repo_persists_coverage(tmp_path):
         version="v")
     loaded = repo.load(1)
     assert loaded.claims[0].coverage == 5
+
+
+def test_factory_builds_service_without_errors():
+    """Ловит ошибки сборки (импорты/конфиг), которые не видны в тестах сервиса."""
+    from app.factcheck.factory import build_service
+
+    settings = Settings(llm_key="test-key", fc_min_coverage=3, searx_url="http://searx:8080")
+    service, llm = build_service(settings, repo=None)
+    assert service is not None and llm is not None
+    assert policy.MIN_COVERAGE == 3

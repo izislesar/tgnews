@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..llm_client import LlmClient, Prompts
+from . import policy
 from ..settings import Settings
 from .claims import ClaimExtractor
 from .correct import LlmCorrector
