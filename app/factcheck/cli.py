@@ -54,7 +54,8 @@ def _print_human(verdict, text: str) -> None:
         print(f"\n[{item.claim.ctype.value}/{item.claim.priority.value}]{flag} "
               f"«{item.claim.text}»")
         print(f"  -> {item.status.value} conf={item.confidence:.2f} "
-              f"cycles={item.cycles} note={item.note[:140]!r}")
+              f"источников={item.coverage} cycles={item.cycles} "
+              f"note={item.note[:140]!r}")
         if item.error:
             print(f"  error: {item.error}")
         for evidence in item.evidence:

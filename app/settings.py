@@ -114,7 +114,7 @@ class Settings:
     fc_fix_facts: bool = False   # вариант 2: переписывать пост под данные источников
     fc_fix_min_conf: float = 0.7
     fc_max_queries: int = 5
-    fc_min_coverage: int = 3   # меньше — «недостаточно источников», без метки
+    fc_min_coverage: int = 5   # меньше — «недостаточно источников», без метки
     fc_daily_calls: int = 600     # предохранитель по расходам на LLM в сутки
     fc_retention_days: int = 14   # сколько хранить запуски/evidence/задачи
     fc_claim_model: str = ""  # пусто -> fallback_model (дешёвая модель)

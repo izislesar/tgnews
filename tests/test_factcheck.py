@@ -202,11 +202,11 @@ def test_aggregate_takes_worst_core_status():
 # ---------- дисклеймер ----------
 def test_disclaimer_only_for_core_claims():
     core_bad = ClaimVerdict(claim=core_claim("Погибли 29 человек"),
-                            status=Status.NOT_FOUND, coverage=3)
+                            status=Status.NOT_FOUND, coverage=5)
     secondary_bad = ClaimVerdict(
         claim=Claim(idx=1, text="подробности", ctype=ClaimType.EVENT,
                     priority=Priority.SECONDARY),
-        status=Status.NOT_FOUND, coverage=3)
+        status=Status.NOT_FOUND, coverage=5)
     verdict = PostVerdict(status=Status.NOT_FOUND, claims=[core_bad, secondary_bad])
     text = verdict.disclaimer
     assert text and "не подтверждено" in text.lower()
@@ -226,7 +226,7 @@ def test_disclaimer_none_when_all_core_supported():
 def test_disclaimer_refuted_wording():
     verdict = PostVerdict(status=Status.REFUTED, claims=[
         ClaimVerdict(claim=core_claim("Погибли 300 человек"), status=Status.REFUTED,
-                     confidence=0.95, coverage=3)
+                     confidence=0.95, coverage=5)
     ])
     assert "опровергают" in (verdict.disclaimer or "")
 
@@ -554,7 +554,7 @@ def test_body_appends_disclaimer():
 
     verdict = PostVerdict(status=Status.NOT_FOUND, claims=[
         ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
-                     coverage=3)])
+                     coverage=5)])
     body = bot._body(post, verdict)
     assert "t.me/ch/10" in body
     assert "не подтверждено" in body.lower()
@@ -609,7 +609,7 @@ def test_note_verdict_edits_cards(monkeypatch):
     monkeypatch.setattr(bot.bot, "send_message", fake_send)
     verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
         ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
-                     coverage=3)])
+                     coverage=5)])
     asyncio.run(bot.note_verdict(qid, verdict))
 
     assert calls, "карточка должна обновиться"
@@ -689,7 +689,7 @@ def test_note_verdict_ignores_undelivered(monkeypatch):
     monkeypatch.setattr(bot.bot, "send_message", fake_send)
     verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
         ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
-                     coverage=3)])
+                     coverage=5)])
     asyncio.run(bot.note_verdict(qid, verdict))
     assert calls == []  # карточку админ ещё не получал — не шумим
 
@@ -746,7 +746,7 @@ def test_pool_copy_updates_after_late_verdict(monkeypatch):
 
     verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
         ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
-                     coverage=3)])
+                     coverage=5)])
     asyncio.run(bot.note_verdict(qid, verdict))
     pool_messages = [text for chat_id, text, _ in sent[1:] if chat_id == 777]
     assert pool_messages, "в чате отбора должна появиться метка ответом на копию"
@@ -795,7 +795,7 @@ def test_album_gets_single_label_in_pool(monkeypatch):
 
     verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
         ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
-                     coverage=3)])
+                     coverage=5)])
     asyncio.run(bot.note_verdict(qid, verdict))
     labels = [text for chat_id, text, _ in sent if chat_id == 777
               and "не подтверждено" in text.lower()]
@@ -1060,10 +1060,10 @@ def test_job_state_transitions(tmp_path):
 def test_disclaimer_suppressed_when_coverage_is_low():
     low = PostVerdict(status=Status.NOT_FOUND, claims=[
         ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
-                     coverage=2)])
+                     coverage=3)])
     ok = PostVerdict(status=Status.NOT_FOUND, claims=[
         ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
-                     coverage=3)])
+                     coverage=5)])
     assert low.disclaimer is None      # источников мало — вывода не делаем
     assert ok.disclaimer is not None
 
@@ -1124,7 +1124,7 @@ def test_factory_builds_service_without_errors():
     """Ловит ошибки сборки (импорты/конфиг), которые не видны в тестах сервиса."""
     from app.factcheck.factory import build_service
 
-    settings = Settings(llm_key="test-key", fc_min_coverage=3, searx_url="http://searx:8080")
+    settings = Settings(llm_key="test-key", fc_min_coverage=5, searx_url="http://searx:8080")
     service, llm = build_service(settings, repo=None)
     assert service is not None and llm is not None
-    assert policy.MIN_COVERAGE == 3
+    assert policy.MIN_COVERAGE == 5
