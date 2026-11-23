@@ -68,6 +68,7 @@ class FactCheckService:
         self.prompts = prompts
         self.corrector = corrector
         self.fix_facts = fix_facts
+        self._last_maintenance = 0.0
         self.clock = clock
 
     # ---------- одна проверка ----------
@@ -240,13 +241,42 @@ class FactCheckService:
 
         return best or ClaimVerdict(claim=claim, status=Status.NOT_FOUND, note="не проверено")
 
+    # ---------- обслуживание ----------
+    def _maintain(self) -> None:
+        """Раз в 6 часов чистим старые задачи/запуски/evidence."""
+        if self.repo is None:
+            return
+        now = self.clock()
+        if now - self._last_maintenance < 6 * 3600:
+            return
+        self._last_maintenance = now
+        try:
+            deleted = self.repo.cleanup(self.settings.fc_retention_days)
+            if deleted:
+                print(f"[fc] обслуживание: удалено записей {deleted}")
+        except Exception as exc:
+            print(f"[fc] обслуживание: {exc}")
+
     # ---------- очередь ----------
-    async def run_forever(self, *, poll_s: float = 5.0, on_done=None) -> None:
+    async def run_forever(self, *, poll_s: float = 5.0, on_done=None,
+                          on_alert=None) -> None:
         if self.repo is None:
             raise RuntimeError("run_forever без очереди (repo=None)")
+        last_budget_warn = 0.0
         while True:
             qid = None
             try:
+                self._maintain()
+                day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                if (self.settings.fc_daily_calls > 0
+                        and self.repo.daily_calls(day) >= self.settings.fc_daily_calls):
+                    if self.clock() - last_budget_warn > 600:
+                        last_budget_warn = self.clock()
+                        print(f"[fc] дневной бюджет LLM исчерпан "
+                              f"({self.repo.daily_calls(day)}/{self.settings.fc_daily_calls}) — "
+                              "задачи ждут следующего дня")
+                    await asyncio.sleep(poll_s * 6)
+                    continue
                 qid = self.repo.claim_next()
                 if qid is None:
                     await asyncio.sleep(poll_s)
@@ -260,6 +290,12 @@ class FactCheckService:
                                                 post_ts=self.repo.post_ts(qid))
                 self.repo.save(qid, verdict, version=self.prompts.version())
                 self.repo.finish(qid, "done")
+                self.repo.add_daily_calls(verdict.calls, day)
+                self.repo.log_run(qid, cycle=0, stage="post",
+                                  usage={"calls": verdict.calls,
+                                         "corrected": bool(verdict.corrected_text),
+                                         "degraded": verdict.degraded},
+                                  ms=verdict.elapsed_s * 1000)
                 print(f"[fc] qid={qid} -> {verdict.status.value} "
                       f"({verdict.elapsed_s}s, {verdict.calls} вызовов)")
                 if on_done is not None:
@@ -274,6 +310,8 @@ class FactCheckService:
                 if qid is not None:
                     try:
                         self.repo.fail(qid, str(exc))
+                        if on_alert is not None and self.repo.job_state(qid) == "error":
+                            await on_alert(qid, f"{type(exc).__name__}: {str(exc)[:200]}")
                     except Exception:
                         pass
                 await asyncio.sleep(poll_s)

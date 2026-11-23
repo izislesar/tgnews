@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS evidence(
     status TEXT, ts REAL,
     PRIMARY KEY(claim_key, url)
 );
+CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS fc_runs(
     qid INTEGER, cycle INTEGER, stage TEXT, model TEXT, query TEXT,
     usage_json TEXT, ms REAL, ts REAL
@@ -132,6 +133,10 @@ class FactcheckRepo:
                 (time.time() + delay_s, time.time(), error[:300], qid),
             )
             self.con.commit()
+
+    def job_state(self, qid: int) -> str | None:
+        row = self.con.execute("SELECT state FROM fc_jobs WHERE qid=?", (qid,)).fetchone()
+        return row[0] if row else None
 
     def job_tier(self, qid: int) -> str:
         row = self.con.execute("SELECT tier FROM fc_jobs WHERE qid=?", (qid,)).fetchone()
@@ -258,6 +263,45 @@ class FactcheckRepo:
             "ORDER BY COUNT(*) DESC",
             (cutoff,),
         ).fetchall()
+
+    # ---------- бюджет ----------
+    def daily_calls(self, day: str) -> int:
+        row = self.con.execute(
+            "SELECT value FROM settings WHERE key=?", (f"fc_calls:{day}",)).fetchone()
+        try:
+            return int(row[0]) if row else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def add_daily_calls(self, count: int, day: str) -> int:
+        key = f"fc_calls:{day}"
+        with self.lock:
+            row = self.con.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            total = (int(row[0]) if row and str(row[0]).isdigit() else 0) + max(0, int(count))
+            self.con.execute(
+                "INSERT INTO settings(key, value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(total)))
+            self.con.commit()
+            return total
+
+    # ---------- обслуживание ----------
+    def failed_jobs(self) -> int:
+        row = self.con.execute(
+            "SELECT COUNT(*) FROM fc_jobs WHERE state='error'").fetchone()
+        return int(row[0]) if row else 0
+
+    def cleanup(self, days: int = 14) -> int:
+        cutoff = time.time() - days * 86400
+        with self.lock:
+            deleted = 0
+            for sql in (
+                "DELETE FROM fc_jobs WHERE state IN ('done','error') AND updated < ?",
+                "DELETE FROM fc_runs WHERE ts < ?",
+                "DELETE FROM evidence WHERE ts < ?",
+            ):
+                deleted += self.con.execute(sql, (cutoff,)).rowcount
+            self.con.commit()
+            return deleted
 
     def degraded_count(self, days: int = 7) -> int:
         cutoff = time.time() - days * 86400

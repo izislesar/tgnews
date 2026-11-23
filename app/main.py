@@ -1,12 +1,23 @@
 """Точка входа: юзербот-коллектор + бот-интерфейс + фоновый фактчекинг."""
 
 import asyncio
+from pathlib import Path
 
 from .bot import AdminBot
 from .factcheck.repo import FactcheckRepo
 from .settings import Settings
 from .store import Store
 from .worker import Worker
+
+
+async def _heartbeat(path: str = "/tmp/health", interval: float = 60.0) -> None:
+    """Отметка живости для docker healthcheck: бот может работать без HTTP."""
+    while True:
+        try:
+            Path(path).touch()
+        except OSError:
+            pass
+        await asyncio.sleep(interval)
 
 
 def _admin_ids(raw: str) -> set[int]:
@@ -37,6 +48,7 @@ async def main():
         raise SystemExit("ADMIN_IDS пуст — перечисли telegram-айди админов через запятую")
 
     app = AdminBot(store, worker, admin_ids, settings=settings, fc_repo=fc_repo)
+    asyncio.create_task(_heartbeat(), name="heartbeat")
 
     if fc_repo is not None:
         from .factcheck.factory import build_service
@@ -44,7 +56,8 @@ async def main():
         service, _llm = build_service(settings, fc_repo)
         app.fc_service = service
         asyncio.create_task(
-            service.run_forever(on_done=app.note_verdict), name="factcheck"
+            service.run_forever(on_done=app.note_verdict,
+                                on_alert=app.alert_factcheck), name="factcheck"
         )
         print("[fc] фоновый воркер запущен")
 

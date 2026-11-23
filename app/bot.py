@@ -3,9 +3,12 @@ import asyncio
 import html
 import json
 import re
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import (TelegramBadRequest, TelegramForbiddenError,
+                                TelegramRetryAfter)
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (Message, CallbackQuery, BotCommand,
                            InlineKeyboardMarkup, InlineKeyboardButton,
@@ -60,6 +63,35 @@ CARD = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="В отбор", callback_data="pool"),
      InlineKeyboardButton(text="Проверка", callback_data="check")],
 ])
+
+
+def split_html(text: str, limit: int = 4000) -> list[str]:
+    """Режем длинный пост по строкам, чтобы не ловить «message is too long».
+
+    Telegram-лимит 4096; режем по границам строк, чтобы не порвать разметку.
+    Строка длиннее лимита режется по пробелам (редкий случай — длинный LLM-абзац).
+    """
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    current = ""
+    for block in text.split("\n"):
+        candidate = f"{current}\n{block}" if current else block
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        while len(block) > limit:
+            cut = block.rfind(" ", 0, limit)
+            if cut < limit // 2:
+                cut = limit
+            chunks.append(block[:cut])
+            block = block[cut:].lstrip()
+        current = block
+    if current:
+        chunks.append(current)
+    return [chunk for chunk in chunks if chunk.strip()]
 
 
 def fmt_html(text: str) -> str:
@@ -195,7 +227,8 @@ class AdminBot:
                 await cb.answer("Вердикта пока нет", show_alert=False)
                 return
             await cb.answer()
-            await cb.message.answer(self._verdict_text(verdict), parse_mode="HTML")
+            for chunk in split_html(self._verdict_text(verdict)):
+                await self._send_text(cb.message.chat.id, chunk)
 
         # релей: юзербот постит медиа с маркером #Q в канал-релей
         @self.dp.channel_post(F.chat.id == self.relay_id)
@@ -329,28 +362,46 @@ class AdminBot:
                                  "карточки обновятся, когда вердикт будет готов.")
         self.store.set_last_request(admin)
 
+    async def _send_text(self, chat_id: int, html_text: str, markup=None):
+        """Отправка с обработкой FloodWait и битой разметки."""
+        try:
+            return await self.bot.send_message(chat_id, html_text, parse_mode="HTML",
+                                               reply_markup=markup)
+        except TelegramRetryAfter as exc:
+            wait = int(getattr(exc, "retry_after", 3)) + 1
+            print(f"[deliver] FloodWait {wait}с")
+            await asyncio.sleep(wait)
+            return await self.bot.send_message(chat_id, html_text, parse_mode="HTML",
+                                               reply_markup=markup)
+        except TelegramBadRequest as exc:
+            if "parse" in str(exc).lower() or "entit" in str(exc).lower():
+                plain = re.sub(r"<[^>]+>", "", html_text)
+                return await self.bot.send_message(chat_id, plain, reply_markup=markup)
+            raise
+
     async def _deliver(self, chat_id: int, cache_key: str | None, body_html: str,
                        qid: int | None = None, with_markup: bool = True):
         """Одно сообщение: медиа+подпись (<=1024) или медиа+текст следом, или просто текст.
         С qid вешает карточку модерации (кнопки В отбор/Отказ)."""
         items = json.loads(cache_key and self.store.cached_fileids(cache_key) or "[]")
         items = [it for it in items if it.get("id")]
-        markup = CARD if (qid and with_markup) else None
         sent = []
-        if not items:
-            sent.append(await self.bot.send_message(chat_id, body_html, parse_mode="HTML",
-                                                    reply_markup=markup))
-        else:
-            # альбом: карточку к media group не прикрепить (Bot API) — шлём альбом
-            # без подписи, а текст + карточку следом отдельным сообщением
-            media = [KIND_MAP[it["kind"]](media=it["id"]) for it in items]
-            sent += await self.bot.send_media_group(chat_id, media=media)
-            sent.append(await self.bot.send_message(chat_id, body_html, parse_mode="HTML",
-                                                    reply_markup=markup))
+        media_sent = 0
+        if items:
+            try:
+                media = [KIND_MAP[it["kind"]](media=it["id"]) for it in items]
+                sent += await self.bot.send_media_group(chat_id, media=media)
+                media_sent = len(sent)
+            except Exception as exc:
+                print(f"[deliver] media group: {exc} — отправляю только текстом")
+        chunks = split_html(body_html)
+        for index, chunk in enumerate(chunks):
+            is_last = index == len(chunks) - 1
+            markup = CARD if (qid and with_markup and is_last) else None
+            sent.append(await self._send_text(chat_id, chunk, markup))
         if qid:
-            # последнее сообщение — текст с кнопками; остальные — медиа альбома
             for index, m in enumerate(sent):
-                kind = "text" if index == len(sent) - 1 else "media"
+                kind = "media" if index < media_sent else "text"
                 self.store.map_card(chat_id, m.message_id, qid, kind)
 
     async def _edit_card(self, message: Message, note: str | None):
@@ -423,7 +474,8 @@ class AdminBot:
             await cb.answer("Прошлая проверка не удалась — перепроверяю")
             return
         await cb.answer("Вердикт есть")
-        await cb.message.answer(self._verdict_text(verdict), parse_mode="HTML")
+        for chunk in split_html(self._verdict_text(verdict)):
+            await self._send_text(cb.message.chat.id, chunk)
 
     async def cmd_fc(self, message: Message, command: CommandObject = None,
                      admin_id: int | None = None):
@@ -441,7 +493,8 @@ class AdminBot:
             return
         verdict = self.fc_repo.load(qid)
         if verdict is not None:
-            await message.answer(self._verdict_text(verdict), parse_mode="HTML")
+            for chunk in split_html(self._verdict_text(verdict)):
+                await self._send_text(message.chat.id, chunk)
             return
         self.fc_repo.enqueue(qid, "t2")
         await message.answer(f"Проверка qid={qid} поставлена в очередь.")
@@ -542,13 +595,22 @@ class AdminBot:
                                f"<b>{STATUS_RU.get(verdict.status.value, verdict.status.value)}</b>. "
                                "Метка не ставится — режим shadow.")
 
+    async def alert_factcheck(self, qid: int, error: str):
+        """Жёсткий сбой проверки (исчерпаны попытки) — сообщаем админам."""
+        text = (f"⚠️ Фактчекинг qid={qid} не смог завершиться: "
+                f"{html.escape(error[:200])}\nПост идёт без проверки.")
+        for admin_id in self.admin_ids:
+            try:
+                await self._send_text(admin_id, text)
+            except Exception:
+                pass
+
     async def _notify(self, qid: int, chat_id: int, text: str):
         """Короткая заметка админам с переходом к разбору проверки."""
         markup = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="Источники", callback_data=f"fcv:{qid}")]])
         try:
-            await self.bot.send_message(chat_id, f"{text}\nqid={qid}",
-                                        parse_mode="HTML", reply_markup=markup)
+            await self._send_text(chat_id, f"{text}\nqid={qid}", markup)
         except Exception as exc:
             print(f"[fc] notify {qid}: {exc}")
 
@@ -604,6 +666,10 @@ class AdminBot:
                              + (" / ".join(f"{k}={v}" for k, v in fc.items()) or "нет данных")
                              + f" · сбоев: {self.fc_repo.degraded_count()}"
                              + f" · в очереди: {self.fc_repo.pending()}")
+                day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                lines.append(f"LLM сегодня: {self.fc_repo.daily_calls(day)}"
+                             f"/{self.settings.fc_daily_calls}"
+                             f" · задач с ошибкой: {self.fc_repo.failed_jobs()}")
             except Exception as exc:
                 lines.append(f"Фактчекинг: ошибка {exc}")
         await message.answer("\n".join(lines))

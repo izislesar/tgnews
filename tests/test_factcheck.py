@@ -970,3 +970,76 @@ def test_search_empty_from_fallback_is_not_an_outage():
     client._get = fake_get
     assert asyncio.run(client.search(Query(text="x"))) == []  # не исключение
     assert len(calls) == 2
+
+
+# ---------- production hardening ----------
+def test_split_html_respects_limit_and_keeps_content():
+    from app.bot import split_html
+
+    text = "\n".join("Длинная строка с текстом поста и ссылкой " * 20 for _ in range(15))
+    chunks = split_html(text, limit=4000)
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 4000 for chunk in chunks)
+    assert all(chunk.strip() for chunk in chunks)
+    assert sum(len(chunk) for chunk in chunks) >= len(text) * 0.9
+
+
+def test_split_html_short_text_is_single_chunk():
+    from app.bot import split_html
+
+    assert split_html("короткий пост") == ["короткий пост"]
+
+
+def test_send_text_falls_back_to_plain_text(monkeypatch):
+    from aiogram.exceptions import TelegramBadRequest
+
+    bot, _store = _stub_bot()
+    sent = []
+
+    async def fake_send(chat_id, text, **kwargs):
+        if kwargs.get("parse_mode") == "HTML" and "<b>" in text:
+            raise TelegramBadRequest(None, "Bad Request: can't parse entities: ...")
+        sent.append(text)
+        return type("M", (), {"message_id": 1})()
+
+    monkeypatch.setattr(bot.bot, "send_message", fake_send)
+    asyncio.run(bot._send_text(1, "<b>жирный</b> текст"))
+    assert sent == ["жирный текст"]
+
+
+def test_daily_calls_counter(tmp_path):
+    _con, repo = _repo_with_post(tmp_path)
+    day = "2026-11-23"
+    assert repo.daily_calls(day) == 0
+    assert repo.add_daily_calls(5, day) == 5
+    assert repo.add_daily_calls(3, day) == 8
+    assert repo.daily_calls(day) == 8
+    assert repo.daily_calls("2026-11-24") == 0
+
+
+def test_cleanup_removes_old_records(tmp_path):
+    import time as _time
+    con, repo = _repo_with_post(tmp_path)
+    old = _time.time() - 30 * 86400
+    repo.enqueue(1)
+    repo.finish(1, "done")
+    con.execute("UPDATE fc_jobs SET updated=?", (old,))
+    con.execute("INSERT INTO fc_runs(qid, cycle, stage, model, query, usage_json, ms, ts) "
+                "VALUES(1, 0, 'post', '', '', '{}', 1, ?)", (old,))
+    con.execute("INSERT INTO evidence(claim_key, url, domain, publisher_group, title, "
+                "quote, status, ts) VALUES('k', 'https://x/a', 'x', 'g', 't', 'q', "
+                "'supported', ?)", (old,))
+    con.commit()
+    assert repo.cleanup(14) == 3
+    assert repo.pending() == 0
+
+
+def test_job_state_transitions(tmp_path):
+    _con, repo = _repo_with_post(tmp_path)
+    repo.enqueue(1)
+    repo.claim_next()
+    assert repo.job_state(1) == "running"
+    repo.fail(1, "boom")
+    assert repo.job_state(1) == "retry"
+    repo.finish(1, "error")
+    assert repo.job_state(1) == "error"

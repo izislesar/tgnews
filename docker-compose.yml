@@ -3,14 +3,14 @@ services:
     image: searxng/searxng:latest
     restart: unless-stopped
     environment:
-      # обязателен для SearXNG; поменяй на свою строку и не коммить в публичный репо
       - SEARXNG_SECRET=${SEARXNG_SECRET:-tgnews_searxng_change_me}
       - SEARXNG_BASE_URL=http://searxng:8080/
+      - MALLOC_ARENA_MAX=2
     volumes:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     expose:
       - "8080"
-    mem_limit: 400m
+    mem_limit: 350m
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -19,6 +19,17 @@ services:
       - CHOWN
       - SETGID
       - SETUID
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz | grep -q OK"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   app:
     build: .
@@ -28,9 +39,24 @@ services:
       - TZ=Europe/Berlin
       - PYTHONUNBUFFERED=1
       - SEARX_URL=http://searxng:8080
+      # glibc-арены: меньше фрагментации RSS при парсинге HTML в потоках
+      - MALLOC_ARENA_MAX=2
     volumes:
       - ./data:/data
       - ./channels.txt:/app/channels.txt:ro
       - ./prompt.txt:/app/prompt.txt:ro
     depends_on:
       - searxng
+    mem_limit: 800m
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import os,sys,time; sys.exit(0 if time.time()-os.path.getmtime('/tmp/health')<300 else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

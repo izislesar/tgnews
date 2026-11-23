@@ -261,6 +261,69 @@ SearXNG поднимается сервисом `searxng` в `docker-compose.yml
 Незнакомый домен попадает в группу `other` и **не** считается подтверждением:
 список надо пополнять (в выводе CLI он виден как `other`).
 
+## Эксплуатация (production)
+
+**Живость.** У обоих контейнеров есть healthcheck: у `app` — heartbeat-файл
+`/tmp/health` (обновляется раз в минуту), у `searxng` — `/healthz`.
+`docker compose ps` показывает `healthy`; если `app` ушёл в `unhealthy`,
+`restart: unless-stopped` перезапустит его.
+
+**Память.** Лимиты: `app` — 800 МБ, `searxng` — 350 МБ (сервер 1.9 ГБ, swap нет).
+Приложение держит ~500 МБ RSS (Telethon + aiogram + lxml/trafilatura), поэтому
+`MALLOC_ARENA_MAX=2` и `FETCH_CONCURRENCY=2` — это сознательные настройки, не
+меняй их без замера. Если `app` упирается в лимит — первым делом снижай
+`FC_MAX_CLAIMS`/`FC_SNIPPETS` или выключай `FC_FIX_FACTS`.
+
+**Расходы.** `FC_DAILY_CALLS` (по умолчанию 600) — предохранитель: при исчерпании
+задачи остаются в очереди до следующих суток, бот продолжает работать. Текущий
+расход виден в `/stats` («LLM сегодня: N/600»), история — в `fc_runs`.
+
+**Ретеншен.** Раз в 6 часов удаляются: завершённые задачи старше
+`FC_RETENTION_DAYS` (14), запуски `fc_runs` и `evidence`.
+
+**Бэкапы.**
+
+```bash
+# разовый
+bash deploy/backup.sh
+# ежедневно в 04:00 UTC
+cp deploy/backup.sh /root/tgnews/deploy/backup.sh
+cat >/etc/systemd/system/tgnews-backup.service <<'EOF'
+[Unit]
+Description=tgnews sqlite backup
+[Service]
+Type=oneshot
+ExecStart=/root/tgnews/deploy/backup.sh
+EOF
+cat >/etc/systemd/system/tgnews-backup.timer <<'EOF'
+[Unit]
+Description=tgnews backup timer
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload && systemctl enable --now tgnews-backup.timer
+```
+
+**Включение фактчекинга.**
+
+| Шаг | Команда | Что меняется |
+|---|---|---|
+| 1. Обкатка | `FC_ENABLED=shadow` (+`FC_FIX_FACTS=on`) | вердикты и правки считаются, посты не меняются |
+| 2. Проверка качества | `/fc <qid>`, `/stats` | смотрим долю опровергнутых и качество правок |
+| 3. Боевой | `FC_ENABLED=on` | метки и переписанные тексты идут в карточки |
+
+После правки `.env` — `docker compose up -d --force-recreate app`.
+
+**Откат.** `git reset --hard <предыдущий-коммит> && docker compose up -d --build`
+на сервере; для отключения только фактчекинга — `FC_ENABLED=off` и рестарт `app`.
+
+**Диагностика.** `docker compose logs --since 1h app | grep '\[fc'` — прогресс,
+`[fc.fetch] HTTP 403` у отдельных доменов нормален (антибот), `[fc] цикл qid=…` —
+единичные ошибки, после 3 попыток задача уходит в `error` и админам приходит алерт.
+
 ## Ограничения (честно)
 
 - Доноры — только публичные каналы; юзербот должен иметь доступ
