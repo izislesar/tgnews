@@ -327,6 +327,40 @@ def effective_status(verdict: ClaimVerdict) -> Status:
     return verdict.status
 
 
+# Вес статуса для оценки «насколько новость корректна».
+_STATUS_WEIGHT = {
+    Status.SUPPORTED: 1.0,
+    Status.PARTIAL: 0.5,
+    Status.CONTESTED: 0.25,
+    Status.NOT_FOUND: 0.0,
+    Status.REFUTED: 0.0,
+}
+
+
+def correctness_score(verdict: PostVerdict) -> float | None:
+    """Доля корректных core-фактов 0..1. None — считать не из чего.
+
+    Учитываются только утверждения, по которым реально смотрели достаточно
+    источников (иначе это не «неверно», а «не проверяли»). Исправленные факты
+    считаются корректными — они уже приведены к источникам.
+    """
+    scores: list[float] = []
+    for item in verdict.claims:
+        if item.corrected:
+            scores.append(1.0)
+            continue
+        if not item.claim.is_core or item.claim.ctype is ClaimType.OPINION:
+            continue
+        if item.status is Status.SKIPPED or item.error:
+            continue
+        if item.coverage < MIN_COVERAGE:
+            continue
+        scores.append(_STATUS_WEIGHT.get(item.status, 0.0))
+    if not scores:
+        return None
+    return sum(scores) / len(scores)
+
+
 def rank(status: Status) -> int:
     """Чем больше — тем хуже для поста (refuted > contested > not_found > partial)."""
     return _SEVERITY.get(status, 0)

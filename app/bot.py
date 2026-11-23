@@ -18,6 +18,7 @@ from telethon import functions
 from . import llm
 from .factcheck import policy
 from .factcheck.models import PostVerdict, Status
+from .factcheck.widget import render_widget
 from .settings import Settings
 
 
@@ -315,6 +316,17 @@ class AdminBot:
             await message.answer("Новых постов нет (окно 48 часов).")
             return
 
+        # проверки: ставим в очередь всё, чего ещё нет, и ждём до fc_wait_s
+        verdicts: dict[int, PostVerdict | None] = {
+            row[0]: self._verdict_for(row[0]) for row in cands
+        }
+        wait_task = None
+        if self.fc_mode != "off":
+            missing = [qid for qid, verdict in verdicts.items() if verdict is None]
+            if missing:
+                wait_task = asyncio.create_task(
+                    self._wait_verdicts(missing, self.settings.fc_wait_s))
+
         # перевод и ожидание медиарелея — параллельно
         translate_task = asyncio.create_task(llm.translate_many([c[4] for c in cands]))
         created = []
@@ -336,6 +348,11 @@ class AdminBot:
         delivered = 0
         pending_fc = 0
         results = await translate_task
+        if wait_task is not None:
+            await wait_task
+            for qid, verdict in verdicts.items():
+                if verdict is None and self.fc_repo is not None:
+                    verdicts[qid] = self.fc_repo.load(qid)
         for (qid, username, ids, key, text, views, reactions, ts, has_media), out in zip(cands, results):
             if delivered >= n:
                 break
@@ -346,13 +363,14 @@ class AdminBot:
                 continue
             self.store.set_ru_text(qid, out)
 
-            verdict = self._verdict_for(qid)
+            verdict = verdicts.get(qid)
             if self.fc_mode != "off" and verdict is None:
                 pending_fc += 1
             post = {"ru_text": out, "username": username, "ids": ids}
             body = self._body(post, verdict if self.fc_mode == "on" else None)
             try:
-                await self._deliver(message.chat.id, key if has_media else None, body, qid=qid)
+                await self._deliver(message.chat.id, key if has_media else None, body,
+                                    qid=qid, verdict=verdict)
                 delivered += 1
                 self.store.mark_issued(qid, admin)
             except Exception as e:
@@ -380,8 +398,43 @@ class AdminBot:
                 return await self.bot.send_message(chat_id, plain, reply_markup=markup)
             raise
 
+    async def _send_widget(self, chat_id: int, qid: int | None,
+                            verdict: PostVerdict | None):
+        """Виджет фактчекинга — отдельным сообщением под постом, пост остаётся чистым.
+
+        Если проверка ещё не закончилась — всё равно показываем блок, чтобы админ
+        не гадал, проверялся пост или нет.
+        """
+        if self.fc_mode != "on":
+            return
+        widget = render_widget(verdict, limit=10) if verdict is not None else None
+        if not widget:
+            widget = "🔎 <b>Фактчекинг</b>: проверка идёт, результаты появятся здесь."
+        markup = None
+        if qid:
+            markup = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="Подробнее", callback_data=f"fcv:{qid}")]])
+        # если виджет уже висит под постом — обновляем его, а не плодим второй
+        existing = [(cid, mid) for cid, mid, kind in self.store.cards_for_qid(qid)
+                    if kind == "widget" and cid == chat_id] if qid else []
+        if existing:
+            try:
+                await self.bot.edit_message_text(widget, chat_id=chat_id,
+                                                 message_id=existing[0][1],
+                                                 parse_mode="HTML", reply_markup=markup)
+                return
+            except Exception:
+                pass
+        try:
+            sent = await self._send_text(chat_id, widget, markup)
+            if qid and sent is not None:
+                self.store.map_card(chat_id, sent.message_id, qid, "widget")
+        except Exception as exc:
+            print(f"[fc] widget {qid}: {exc}")
+
     async def _deliver(self, chat_id: int, cache_key: str | None, body_html: str,
-                       qid: int | None = None, with_markup: bool = True):
+                       qid: int | None = None, with_markup: bool = True,
+                       verdict: PostVerdict | None = None):
         """Одно сообщение: медиа+подпись (<=1024) или медиа+текст следом, или просто текст.
         С qid вешает карточку модерации (кнопки В отбор/Отказ)."""
         items = json.loads(cache_key and self.store.cached_fileids(cache_key) or "[]")
@@ -404,6 +457,7 @@ class AdminBot:
             for index, m in enumerate(sent):
                 kind = "media" if index < media_sent else "text"
                 self.store.map_card(chat_id, m.message_id, qid, kind)
+            await self._send_widget(chat_id, qid, verdict)
 
     async def _edit_card(self, message: Message, note: str | None):
         try:
@@ -431,7 +485,8 @@ class AdminBot:
         try:
             # qid без кнопок: копия в чате отбора должна обновляться, когда
             # проверка догонит пост, но кнопки модерации там не нужны
-            await self._deliver(self.pool_chat, key, body, qid=qid, with_markup=False)
+            await self._deliver(self.pool_chat, key, body, qid=qid, with_markup=False,
+                                verdict=verdict)
             return True
         except Exception as e:
             print(f"[pool {qid}] {e}")
@@ -457,9 +512,33 @@ class AdminBot:
         ids = post.get("ids") or ""
         url = f"https://t.me/{post.get('username')}/{ids.split(',')[0]}"
         body = fmt_html(ru) + "\n" * self.link_gap + f'<a href="{url}">{url}</a>'
-        if verdict is not None and verdict.disclaimer:
-            body += "\n\n" + html.escape(verdict.disclaimer, quote=False)
+        tag = self._low_tag(verdict)
+        if tag:
+            body += "\n\n" + html.escape(tag, quote=False)
         return body
+
+    def _low_tag(self, verdict: PostVerdict | None) -> str | None:
+        if self.fc_mode != "on" or verdict is None:
+            return None
+        score = policy.correctness_score(verdict)
+        if score is None or score >= self.settings.fc_low_correctness:
+            return None
+        return f"❌ Низкая корректность: {round(score * 100)}% — проверь перед публикацией"
+
+    async def _wait_verdicts(self, qids: list[int], timeout: float):
+        if self.fc_repo is None:
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, timeout)
+        pending = set(qids)
+        while pending and loop.time() < deadline:
+            for qid in list(pending):
+                if self.fc_repo.load(qid) is not None:
+                    pending.discard(qid)
+            if pending:
+                await asyncio.sleep(1)
+        if pending:
+            print(f"[fc] /get: не дождались проверки для {sorted(pending)[:5]}")
 
     async def _check_card(self, cb: CallbackQuery, qid: int):
         if self.fc_repo is None:
@@ -550,10 +629,10 @@ class AdminBot:
         return text if len(text) <= 4000 else text[:3990] + "…"
 
     async def note_verdict(self, qid: int, verdict: PostVerdict):
-        """Сервис догнал проверкой уже выданную карточку: правим текст и сообщаем.
+        """Сервис догнал проверкой уже выданную карточку.
 
-        Молчаливое редактирование админ не заметит (Telegram не уведомляет об edit),
-        поэтому о значимых исходах отправляем короткую заметку с кнопкой «Источники».
+        Пост обновляем только если появился тег или переписанный текст; сверху
+        отправляем виджет с результатами — это и есть уведомление админу.
         """
         if self.fc_mode == "off":
             return
@@ -562,24 +641,25 @@ class AdminBot:
             return
         cards = self.store.cards_for_qid(qid)
         if not cards:
-            # админ ещё не видел пост: метка попадёт в текст при выдаче /get
+            # админ ещё не видел пост: всё попадёт в выдачу /get
             return
-        # альбом состоит из нескольких сообщений: правим/отвечаем только на текст
         text_cards = [(chat_id, msg_id) for chat_id, msg_id, kind in cards
                       if kind == "text"] or [(chat_id, msg_id)
                                              for chat_id, msg_id, _kind in cards]
-        if self.fc_mode == "on" and verdict.disclaimer:
+
+        if self.fc_mode == "on":
             body = self._body(post, verdict)
+            tag = self._low_tag(verdict)
             for chat_id, msg_id in text_cards:
                 if chat_id == self.pool_chat:
-                    # в чате отбора у копии есть строка «Добавил: …» — редактированием
-                    # мы бы её стёрли, поэтому отвечаем отдельной меткой
-                    try:
-                        await self.bot.send_message(
-                            chat_id, html.escape(verdict.disclaimer, quote=False),
-                            parse_mode="HTML", reply_to_message_id=msg_id)
-                    except Exception:
-                        pass
+                    # у копии в отборе есть строка «Добавил: …» — не затираем её
+                    if tag:
+                        try:
+                            await self.bot.send_message(
+                                chat_id, html.escape(tag, quote=False),
+                                parse_mode="HTML", reply_to_message_id=msg_id)
+                        except Exception:
+                            pass
                     continue
                 try:
                     await self.bot.edit_message_text(body, chat_id=chat_id,
@@ -587,20 +667,23 @@ class AdminBot:
                 except Exception:
                     pass  # медиа-группа/удалённое сообщение — не критично
 
-        chat_id = text_cards[0][0]
+            seen: set[int] = set()
+            for chat_id, _msg_id in text_cards:
+                if chat_id in seen:
+                    continue
+                seen.add(chat_id)
+                await self._send_widget(chat_id, qid, verdict)
+
         if verdict.degraded:
-            await self._notify(qid, chat_id,
+            await self._notify(qid, text_cards[0][0],
                                "⚠️ Проверка не удалась: поиск/загрузка недоступны. "
-                               "Метка не ставилась — нажми «Проверка», чтобы повторить.")
-        elif verdict.disclaimer and self.fc_mode == "on":
-            await self._notify(qid, chat_id,
-                               "🔍 Проверка: <b>метка добавлена в карточку</b>.")
+                               "Нажми «Проверка», чтобы повторить.")
         elif self.fc_mode == "shadow" and verdict.status in (Status.REFUTED,
                                                              Status.CONTESTED):
-            await self._notify(qid, chat_id,
+            await self._notify(qid, text_cards[0][0],
                                "🔍 [shadow] вердикт: "
                                f"<b>{STATUS_RU.get(verdict.status.value, verdict.status.value)}</b>. "
-                               "Метка не ставится — режим shadow.")
+                               "В боевом режиме здесь был бы виджет.")
 
     async def alert_factcheck(self, qid: int, error: str):
         """Жёсткий сбой проверки (исчерпаны попытки) — сообщаем админам."""

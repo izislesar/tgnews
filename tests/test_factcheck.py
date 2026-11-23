@@ -547,17 +547,21 @@ def _stub_bot(settings=None):
     return AdminBot(store, None, {1}, settings=settings), store
 
 
-def test_body_appends_disclaimer():
+def test_body_keeps_post_clean_and_tags_low_correctness():
     bot, _store = _stub_bot()
     post = {"ru_text": "✅ **Текст поста**", "username": "ch", "ids": "10"}
-    assert "не подтверждено" not in bot._body(post, None).lower()
 
-    verdict = PostVerdict(status=Status.NOT_FOUND, claims=[
+    partial = PostVerdict(status=Status.PARTIAL, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.PARTIAL,
+                     confidence=0.8, coverage=5)])
+    clean = bot._body(post, partial)
+    assert "не подтверждено" not in clean.lower()
+    assert "Низкая корректность" not in clean
+
+    bad = PostVerdict(status=Status.NOT_FOUND, claims=[
         ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
                      coverage=5)])
-    body = bot._body(post, verdict)
-    assert "t.me/ch/10" in body
-    assert "не подтверждено" in body.lower()
+    assert "Низкая корректность" in bot._body(post, bad)
 
 
 def test_verdict_text_contains_evidence_and_status():
@@ -588,7 +592,7 @@ def test_store_qid_by_key_and_cards():
     assert store.cards_for_qid(qid) == [(100, 200, "text")]
 
 
-def test_note_verdict_edits_cards(monkeypatch):
+def test_note_verdict_edits_card_and_sends_widget(monkeypatch):
     bot, store = _stub_bot()
     store.add_channel("ch", "t")
     store.upsert_post(1, "ch", "5", "key-9", "текст", 10, 1, 0)
@@ -596,27 +600,27 @@ def test_note_verdict_edits_cards(monkeypatch):
     store.set_ru_text(qid, "✅ **Пост**")
     store.map_card(100, 200, qid)
 
-    calls = []
-    notes = []
+    edits, sent = [], []
 
     async def fake_edit(text, chat_id, message_id, parse_mode=None):
-        calls.append((text, chat_id, message_id))
+        edits.append((chat_id, message_id, text))
 
     async def fake_send(chat_id, text, **kwargs):
-        notes.append((chat_id, text, kwargs.get("reply_markup")))
+        sent.append((chat_id, text, kwargs))
+        return type("M", (), {"message_id": 1})()
 
     monkeypatch.setattr(bot.bot, "edit_message_text", fake_edit)
     monkeypatch.setattr(bot.bot, "send_message", fake_send)
+
     verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
         ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
-                     coverage=5)])
+                     coverage=6,
+                     evidence=[evidence_for("reuters.com")])])
     asyncio.run(bot.note_verdict(qid, verdict))
 
-    assert calls, "карточка должна обновиться"
-    text, chat_id, message_id = calls[0]
-    assert (chat_id, message_id) == (100, 200)
-    assert "не подтверждено" in text.lower()
-    assert notes and "метка добавлена" in notes[0][1]
+    assert edits and "Низкая корректность" in edits[0][2]
+    assert any("Фактчекинг" in text for _chat, text, _kw in sent)
+    assert any("reuters.com" in text for _chat, text, _kw in sent)
 
 
 def test_admin_ids_parsing():
@@ -711,7 +715,7 @@ def test_store_state_by_key():
     assert store.state_by_key("k-dup") == "dup"
 
 
-def test_pool_copy_updates_after_late_verdict(monkeypatch):
+def test_pool_copy_gets_tag_reply_and_widget(monkeypatch):
     from app.bot import AdminBot
     from app.store import Store
 
@@ -728,7 +732,7 @@ def test_pool_copy_updates_after_late_verdict(monkeypatch):
     sent, edits = [], []
 
     async def fake_send(chat_id, text, **kwargs):
-        sent.append((chat_id, text, kwargs.get("reply_markup")))
+        sent.append((chat_id, text, kwargs))
         return type("M", (), {"message_id": 900})()
 
     async def fake_edit(text, chat_id, message_id, parse_mode=None):
@@ -740,17 +744,18 @@ def test_pool_copy_updates_after_late_verdict(monkeypatch):
     user = type("U", (), {"username": "ed", "first_name": "Ed"})()
     assert asyncio.run(bot._send_to_pool(qid, user)) is True
     assert sent and sent[0][0] == 777
-    assert sent[0][2] is None  # в чате отбора кнопок модерации быть не должно
-    assert any(chat_id == 777 and msg_id == 900
-               for chat_id, msg_id, _kind in store.cards_for_qid(qid))
+    assert sent[0][2].get("reply_markup") is None  # без кнопок модерации
 
     verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
         ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
-                     coverage=5)])
+                     coverage=6, evidence=[evidence_for("reuters.com")])])
     asyncio.run(bot.note_verdict(qid, verdict))
-    pool_messages = [text for chat_id, text, _ in sent[1:] if chat_id == 777]
-    assert pool_messages, "в чате отбора должна появиться метка ответом на копию"
-    assert any("не подтверждено" in text.lower() for text in pool_messages)
+
+    pool_texts = [text for chat_id, text, _kw in sent if chat_id == 777]
+    assert any("Низкая корректность" in text for text in pool_texts)
+    assert any("Фактчекинг" in text for text in pool_texts)
+    # «Добавил: …» не затёрт — копия не редактировалась
+    assert not edits
 
 
 def test_album_gets_single_label_in_pool(monkeypatch):
@@ -791,15 +796,18 @@ def test_album_gets_single_label_in_pool(monkeypatch):
 
     asyncio.run(bot._deliver(777, "key-album", "body", qid=qid, with_markup=False))
     kinds = sorted(kind for _c, _m, kind in store.cards_for_qid(qid))
-    assert kinds == ["media", "media", "text"]
+    assert kinds == ["media", "media", "text", "widget"]
 
     verdict = PostVerdict(qid=qid, status=Status.NOT_FOUND, claims=[
         ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
                      coverage=5)])
     asyncio.run(bot.note_verdict(qid, verdict))
-    labels = [text for chat_id, text, _ in sent if chat_id == 777
-              and "не подтверждено" in text.lower()]
-    assert len(labels) == 1, "метка должна быть одна, а не по одной на каждое медиа"
+    widgets = [text for chat_id, text, _ in sent if chat_id == 777
+               and "Фактчекинг" in text]
+    tags = [text for chat_id, text, _ in sent if chat_id == 777
+            and "Низкая корректность" in text]
+    assert len(widgets) == 1, "виджет должен быть один, а не на каждое медиа"
+    assert len(tags) == 1
 
 
 def test_job_tier_is_preserved(tmp_path):
@@ -1128,3 +1136,45 @@ def test_factory_builds_service_without_errors():
     service, llm = build_service(settings, repo=None)
     assert service is not None and llm is not None
     assert policy.MIN_COVERAGE == 5
+
+
+# ---------- виджет фактчекинга ----------
+def test_widget_shows_score_sources_and_mismatch():
+    from app.factcheck.widget import render_widget
+
+    ok = ClaimVerdict(claim=core_claim("ЦАХАЛ заявил об ударе", ctype=ClaimType.ATTRIBUTED),
+                      status=Status.SUPPORTED, confidence=0.9, coverage=6,
+                      evidence=[evidence_for("reuters.com"), evidence_for("bbc.com")])
+    bad = ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
+                       coverage=6, note="источники называют 12",
+                       evidence=[evidence_for("reuters.com")])
+    text = render_widget(PostVerdict(qid=1, claims=[ok, bad]))
+    assert "Фактчекинг" in text
+    assert "50%" in text
+    assert "reuters.com" in text and "bbc.com" in text
+    assert "Что не совпало" in text
+    assert "12" in text
+
+
+def test_widget_marks_insufficient_coverage_without_mismatch():
+    from app.factcheck.widget import render_widget
+
+    weak = ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
+                        coverage=2)
+    text = render_widget(PostVerdict(qid=1, claims=[weak]))
+    assert "недостаточно данных" in text
+    assert "вывод не делался" in text
+    assert "Что не совпало" not in text
+
+
+def test_pending_widget_is_shown(monkeypatch):
+    bot, _store = _stub_bot()
+    sent = []
+
+    async def fake_send(chat_id, text, **kwargs):
+        sent.append(text)
+        return type("M", (), {"message_id": 1})()
+
+    monkeypatch.setattr(bot.bot, "send_message", fake_send)
+    asyncio.run(bot._send_widget(1, 42, None))
+    assert sent and "проверка идёт" in sent[0]
