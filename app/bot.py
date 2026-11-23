@@ -591,7 +591,7 @@ class AdminBot:
                          "извлечение не удалось).")
             return "\n".join(lines)
         for item in verdict.claims[:8]:
-            marker = markers.get(item.status.value, "•")
+            marker = markers.get(policy.effective_status(item).value, "•")
             ctype = TYPE_RU.get(item.claim.ctype.value, item.claim.ctype.value)
             priority = PRIORITY_RU.get(item.claim.priority.value, item.claim.priority.value)
             coverage = f" · источников: {item.coverage}" if item.coverage else ""

@@ -355,11 +355,14 @@ def correctness_score(verdict: PostVerdict) -> float | None:
             continue
         # «не нашли» — это отсутствие вывода, а не нулевая корректность.
         # Иначе правдивая, но не покрытая прессой новость получала бы 0%.
-        if item.status is Status.NOT_FOUND:
+        status = effective_status(item)
+        if status is Status.NOT_FOUND:
+            continue
+        if status is Status.SKIPPED:
             continue
         if item.coverage < MIN_COVERAGE:
             continue
-        scores.append(_STATUS_WEIGHT.get(item.status, 0.0))
+        scores.append(_STATUS_WEIGHT.get(status, 0.0))
     if not scores:
         return None
     return sum(scores) / len(scores)

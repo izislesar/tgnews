@@ -66,6 +66,8 @@ def render_widget(verdict: PostVerdict, *, limit: int = 10) -> str | None:
         header += f": недостаточно данных · источников: {reviewed or len(sources)}"
     else:
         header += f": <b>{round(score * 100)}%</b> · источников: {reviewed or len(sources)}"
+    if not sources and reviewed:
+        header += " (независимых не найдено)"
     lines = [header]
 
     counts: dict[Status, int] = {}
@@ -77,7 +79,7 @@ def render_widget(verdict: PostVerdict, *, limit: int = 10) -> str | None:
             if item.coverage < policy.MIN_COVERAGE:
                 insufficient += 1
                 continue
-        key = Status.SUPPORTED if item.corrected else item.status
+        key = Status.SUPPORTED if item.corrected else policy.effective_status(item)
         counts[key] = counts.get(key, 0) + 1
     if counts:
         parts = [f"{_STATUS_ICON[s]} {_STATUS_RU[s]} {counts[s]}"
