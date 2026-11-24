@@ -1238,3 +1238,99 @@ def test_widget_separates_independent_and_statistics():
     assert "независимых: 1" in text
     assert "статистика: 1" in text
     assert "(стат.)" in text and "banxico.org.mx" in text
+
+
+# ---------- источники и English-first ----------
+def test_worldbank_lookup_returns_stat_snippet():
+    from app.factcheck.worldbank import WorldBankStats
+
+    wb = WorldBankStats()
+    wb._fetch = lambda url: [{"page": 1}, [{
+        "country": {"value": "Mexico"}, "date": "2025", "value": 65086796940}]]
+    claim = Claim(idx=0, text="Remittances to Mexico in 2025 reached 65.5 billion USD",
+                  ctype=ClaimType.NUMERIC, priority=Priority.CORE, numbers=["65.5"])
+    snippets = asyncio.run(wb.lookup(claim))
+    assert snippets
+    assert snippets[0].domain == "worldbank.org"
+    assert "65" in snippets[0].quote
+
+
+def test_gdelt_parses_articles():
+    from app.factcheck.gdelt import GdeltSearch
+
+    gdelt = GdeltSearch()
+    gdelt._fetch = lambda url: {"articles": [
+        {"url": "https://example.com/a", "title": "T", "seendate": "20250101T000000Z"}]}
+    hits = asyncio.run(gdelt.search("Mercury corvette"))
+    assert hits and hits[0].engine == "gdelt"
+    assert hits[0].published == "2025-01-01"
+
+
+def test_english_translator_falls_back_to_source():
+    from app.factcheck.localize import EnglishTranslator
+
+    class BadLlm:
+        async def text(self, **kwargs):
+            raise RuntimeError("down")
+
+    translator = EnglishTranslator(BadLlm(), FakePrompts())
+    source = "Some source text that is definitely long enough."
+    assert asyncio.run(translator.to_english(source)) == source
+
+
+def test_service_translates_to_english_and_localizes():
+    from app.factcheck.service import FactCheckService
+
+    class FakeTranslator:
+        def __init__(self):
+            self.calls = 0
+
+        async def to_english(self, text):
+            self.calls += 1
+            return "ENGLISH PIPELINE TEXT"
+
+    class FakeLocalizer:
+        def __init__(self):
+            self.calls = 0
+
+        async def localize(self, verdict):
+            self.calls += 1
+            return {"claims": [{"idx": 0, "text": "русский текст", "note": "русская заметка"}],
+                    "corrections": []}
+
+    claim = core_claim("Дроновые атаки почти вдвое снизили нефтепереработку в России",
+                       ctype=ClaimType.EVENT, numbers=())
+    judge = FakeJudge([ClaimVerdict(claim=claim, status=Status.NOT_FOUND)])
+    translator, localizer = FakeTranslator(), FakeLocalizer()
+    service = FactCheckService(
+        settings=make_settings(), repo=None, search=FakeSearch(HITS),
+        fetcher=FakeFetch(DOCS), judge=judge,
+        extractor=ClaimExtractor(FakeLlm(CLAIM_PAYLOAD), FakePrompts(), max_claims=3),
+        prompts=FakePrompts(), translator=translator, localizer=localizer)
+    verdict = asyncio.run(service.check_text("исходный текст", tier="t1"))
+    assert translator.calls == 1
+    assert localizer.calls == 1
+    assert verdict.localized["claims"][0]["text"] == "русский текст"
+
+
+def test_repo_persists_en_text_and_localized(tmp_path):
+    _con, repo = _repo_with_post(tmp_path)
+    repo.save_en_text(1, "English text")
+    assert repo.load_en_text(1) == "English text"
+    repo.save(1, PostVerdict(qid=1, status=Status.NOT_FOUND, localized={
+        "claims": [{"idx": 0, "text": "рус", "note": "заметка"}], "corrections": []},
+        claims=[ClaimVerdict(claim=core_claim(), status=Status.NOT_FOUND)]), version="v")
+    loaded = repo.load(1)
+    assert loaded.localized["claims"][0]["text"] == "рус"
+
+
+def test_widget_uses_localized_text():
+    from app.factcheck.widget import render_widget
+
+    verdict = PostVerdict(qid=1, status=Status.NOT_FOUND, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
+                     coverage=6, evidence=[evidence_for("reuters.com")])])
+    text = render_widget(verdict, localized={"claims": [
+        {"idx": 0, "text": "Погибло 29 человек", "note": "нет данных"}], "corrections": []})
+    assert "Погибло 29 человек" in text
+    assert "нет данных" in text

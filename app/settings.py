@@ -91,7 +91,8 @@ class Settings:
     searx_timeout: float = 20.0
     search_concurrency: int = 2
     search_results: int = 20
-    searx_engines: str = "bing,brave,yandex"   # основной набор: объединяется за один запрос
+    searx_engines: str = "bing,brave,mojeek"   # только бесплатные, без API-ключей
+    searx_language: str = "en"                 # локаль всех движков (агентский режим)
     searx_fallback_engines: str = "bing"
 
     # --- загрузка страниц ---
@@ -164,6 +165,8 @@ class Settings:
             search_results=_int(env, "SEARCH_RESULTS", defaults.search_results),
             searx_engines=_get(env, "SEARX_ENGINES", defaults.searx_engines)
             or defaults.searx_engines,
+            searx_language=_get(env, "SEARX_LANGUAGE", defaults.searx_language)
+            or defaults.searx_language,
             searx_fallback_engines=_get(env, "SEARX_FALLBACK_ENGINES",
                                         defaults.searx_fallback_engines)
             or defaults.searx_fallback_engines,

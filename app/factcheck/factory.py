@@ -7,6 +7,9 @@ from . import policy
 from ..settings import Settings
 from .claims import ClaimExtractor
 from .correct import LlmCorrector
+from .gdelt import GdeltSearch
+from .localize import EnglishTranslator, FactcheckLocalizer
+from .worldbank import WorldBankStats
 from .fetch import HttpFetcher
 from .judge import LlmJudge
 from .repo import FactcheckRepo
@@ -41,6 +44,7 @@ def build_service(
             results=settings.search_results,
             concurrency=settings.search_concurrency,
             engines=settings.searx_engines,
+            language=settings.searx_language,
             fallback_engines=settings.searx_fallback_engines,
         ),
         fetcher=HttpFetcher(
@@ -59,6 +63,10 @@ def build_service(
             llm, prompts, model=settings.model,
             min_confidence=settings.fc_fix_min_conf,
         ),
+        translator=EnglishTranslator(llm, prompts),
+        localizer=FactcheckLocalizer(llm, prompts, model=settings.model),
+        worldbank=WorldBankStats(),
+        gdelt=GdeltSearch(),
         fix_facts=settings.fc_fix_facts,
         prompts=prompts,
     )

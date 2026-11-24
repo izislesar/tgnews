@@ -67,10 +67,14 @@ def _esc(text: str) -> str:
     return html.escape(text, quote=False)
 
 
-def render_widget(verdict: PostVerdict, *, limit: int = 10) -> str | None:
+def render_widget(verdict: PostVerdict, *, limit: int = 10,
+                  localized: dict | None = None) -> str | None:
     """Текст виджета (HTML). None — показывать нечего."""
     if not verdict.claims:
         return None
+    loc = localized or verdict.localized or {}
+    loc_claims = {int(item.get("idx", -1)): item for item in loc.get("claims", [])}
+    loc_corr = {int(item.get("idx", -1)): item for item in loc.get("corrections", [])}
     media = independent_sources(verdict, limit=limit)
     stat = statistical_sources(verdict)
     score = policy.correctness_score(verdict)
@@ -116,8 +120,10 @@ def render_widget(verdict: PostVerdict, *, limit: int = 10) -> str | None:
         if status is Status.SUPPORTED:
             continue
         label = _STATUS_RU.get(status, status.value)
-        quote = " ".join(item.claim.text.split())[:70]
-        note = f" — {item.note[:90]}" if item.note else ""
+        text = loc_claims.get(item.claim.idx, {}).get("text") or item.claim.text
+        note_src = loc_claims.get(item.claim.idx, {}).get("note") or item.note
+        quote = " ".join(text.split())[:70]
+        note = f" — {note_src[:90]}" if note_src else ""
         mismatches.append(f"• {quote} ({_esc(label)}){_esc(note)}")
     if mismatches:
         lines.append("<b>Что не совпало:</b>")

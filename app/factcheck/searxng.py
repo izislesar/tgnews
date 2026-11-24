@@ -48,11 +48,13 @@ class SearxngSearch:
         concurrency: int = 2,
         user_agent: str = "tgnews-factcheck/1.0",
         deny: tuple[str, ...] = DEFAULT_DENY,
-        engines: str = "bing,brave,yandex",
+        engines: str = "bing,brave,mojeek",
+        language: str | None = "en",
         fallback_engines: str = "bing",
         cache_ttl: float = 3600.0,
     ):
         self.engines = ",".join(e.strip() for e in engines.split(",") if e.strip())
+        self.language = language
         self.fallback_engines = tuple(
             engine.strip() for engine in fallback_engines.split(",") if engine.strip()
         )
@@ -102,8 +104,9 @@ class SearxngSearch:
         parent = {"q": query.text, "format": "json", "safesearch": "0", "pageno": "1"}
         if self.engines:
             parent["engines"] = self.engines
-        if query.language:
-            parent["language"] = query.language
+        language = query.language or self.language
+        if language:
+            parent["language"] = language
         if query.time_range:
             parent["time_range"] = query.time_range
 

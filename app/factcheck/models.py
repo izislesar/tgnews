@@ -137,6 +137,7 @@ class PostVerdict(BaseModel):
     degraded: bool = False  # поиск/фетч лежали: это не «не подтверждено», это «не проверили»
     corrected_text: str | None = None
     corrections: list[CorrectionItem] = Field(default_factory=list)
+    localized: dict | None = None  # русские тексты утверждений для UI
 
     @property
     def core_claims(self) -> list[ClaimVerdict]:

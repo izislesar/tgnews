@@ -49,6 +49,8 @@ _POST_COLUMNS = {
     "fc_degraded": "INTEGER",
     "fc_corrected": "TEXT",
     "fc_corrections": "TEXT",
+    "en_text": "TEXT",
+    "fc_localized": "TEXT",
     "neutral_ok": "INTEGER",
 }
 
@@ -144,6 +146,15 @@ class FactcheckRepo:
         row = self.con.execute("SELECT tier FROM fc_jobs WHERE qid=?", (qid,)).fetchone()
         return (row[0] if row and row[0] else "t1")
 
+    def save_en_text(self, qid: int, text: str) -> None:
+        with self.lock:
+            self.con.execute("UPDATE posts SET en_text=? WHERE qid=?", (text, qid))
+            self.con.commit()
+
+    def load_en_text(self, qid: int) -> str | None:
+        row = self.con.execute("SELECT en_text FROM posts WHERE qid=?", (qid,)).fetchone()
+        return row[0] if row and row[0] else None
+
     def post_text(self, qid: int) -> str | None:
         row = self.con.execute("SELECT text FROM posts WHERE qid=?", (qid,)).fetchone()
         return row[0] if row else None
@@ -159,11 +170,14 @@ class FactcheckRepo:
         with self.lock:
             corrections = json.dumps(
                 [item.model_dump() for item in verdict.corrections], ensure_ascii=False)
+            localized = json.dumps(verdict.localized, ensure_ascii=False) \
+                if verdict.localized else None
             self.con.execute(
                 "UPDATE posts SET fc_status=?, fc_summary=?, fc_version=?, fc_ts=?, "
-                "fc_degraded=?, fc_corrected=?, fc_corrections=? WHERE qid=?",
+                "fc_degraded=?, fc_corrected=?, fc_corrections=?, fc_localized=? "
+                "WHERE qid=?",
                 (verdict.status.value, summary, version, now, int(verdict.degraded),
-                 verdict.corrected_text, corrections, qid),
+                 verdict.corrected_text, corrections, localized, qid),
             )
             self.con.execute(
                 "DELETE FROM evidence WHERE claim_key IN "
@@ -192,7 +206,7 @@ class FactcheckRepo:
     def load(self, qid: int) -> PostVerdict | None:
         row = self.con.execute(
             "SELECT fc_status, fc_summary, fc_version, fc_degraded, fc_corrected, "
-            "fc_corrections FROM posts WHERE qid=?",
+            "fc_corrections, fc_localized FROM posts WHERE qid=?",
             (qid,),
         ).fetchone()
         # fc_status IS NULL = пост ещё не проверяли. Возвращать «skipped» нельзя:
@@ -238,6 +252,11 @@ class FactcheckRepo:
             corrections = [CorrectionItem(**item) for item in json.loads(row[5] or "[]")]
         except Exception:
             corrections = []
+        localized = None
+        try:
+            localized = json.loads(row[6]) if row[6] else None
+        except Exception:
+            localized = None
         return PostVerdict(
             status=Status(row[0]),
             claims=claims,
@@ -246,6 +265,7 @@ class FactcheckRepo:
             degraded=bool(row[3]),
             corrected_text=row[4],
             corrections=corrections,
+            localized=localized,
         )
 
     def log_run(self, qid: int, *, cycle: int, stage: str, model: str = "",

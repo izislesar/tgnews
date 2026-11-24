@@ -13,6 +13,9 @@ from . import policy
 from . import query as query_mod
 from .claims import ClaimExtractor
 from .correct import LlmCorrector
+from .gdelt import GdeltSearch
+from .localize import EnglishTranslator, FactcheckLocalizer
+from .worldbank import WorldBankStats
 from .fetch import HttpFetcher, select_snippets
 from .judge import LlmJudge
 from .models import (
@@ -56,6 +59,10 @@ class FactCheckService:
         extractor: ClaimExtractor,
         prompts: Prompts,
         corrector: LlmCorrector | None = None,
+        translator: EnglishTranslator | None = None,
+        localizer: FactcheckLocalizer | None = None,
+        worldbank: WorldBankStats | None = None,
+        gdelt: GdeltSearch | None = None,
         fix_facts: bool = False,
         clock=time.monotonic,
     ):
@@ -67,6 +74,10 @@ class FactCheckService:
         self.extractor = extractor
         self.prompts = prompts
         self.corrector = corrector
+        self.translator = translator
+        self.localizer = localizer
+        self.worldbank = worldbank
+        self.gdelt = gdelt
         self.fix_facts = fix_facts
         self._last_maintenance = 0.0
         self.clock = clock
@@ -86,7 +97,8 @@ class FactCheckService:
         budget = Budget(max_calls)
         deadline = started + self.settings.fc_deadline_s
 
-        claims = await self.extractor.extract(text)
+        english = await self._ensure_english(text, qid, budget)
+        claims = await self.extractor.extract(english)
         budget.calls += 1
 
         secondary = [
@@ -98,7 +110,7 @@ class FactCheckService:
                 if c.is_core and c.ctype is not ClaimType.OPINION]
 
         if not core:
-            return PostVerdict(
+            skipped = PostVerdict(
                 status=Status.SKIPPED,
                 claims=secondary,
                 qid=qid,
@@ -106,6 +118,7 @@ class FactCheckService:
                 calls=budget.calls,
                 elapsed_s=round(self.clock() - started, 2),
             )
+            return await self._localize(skipped, budget)
 
         cycles = 1 if tier == "t1" else max(1, self.settings.fc_cycles)
         semaphore = asyncio.Semaphore(max(1, self.settings.fc_judge_concurrency))
@@ -152,7 +165,39 @@ class FactCheckService:
             verdict.note = f"часть проверок не удалась ({len(errored)} из {len(checked)})"
         else:
             verdict.note = verdict.disclaimer or ""
-        return await self._maybe_correct(text, verdict, fix_facts, budget)
+        corrected = await self._maybe_correct(english, verdict, fix_facts, budget)
+        return await self._localize(corrected, budget)
+
+    async def _ensure_english(self, text: str, qid: int | None,
+                              budget: Budget) -> str:
+        """Весь агентский пайплайн работает на английском: переводим вход один раз."""
+        if self.translator is None:
+            return text
+        if self.repo is not None and qid is not None:
+            cached = self.repo.load_en_text(qid)
+            if cached:
+                return cached
+        budget.take()
+        english = await self.translator.to_english(text)
+        if self.repo is not None and qid is not None:
+            try:
+                self.repo.save_en_text(qid, english)
+            except Exception as exc:
+                print(f"[fc.en] save {qid}: {exc}")
+        return english
+
+    async def _localize(self, verdict: PostVerdict, budget: Budget) -> PostVerdict:
+        """Русские тексты утверждений для виджета и /fc."""
+        if self.localizer is None or verdict.localized is not None:
+            return verdict
+        try:
+            budget.take()
+            localized = await self.localizer.localize(verdict)
+        except BudgetExceeded:
+            return verdict
+        if not localized:
+            return verdict
+        return verdict.model_copy(update={"localized": localized})
 
     async def _maybe_correct(self, text: str, verdict: PostVerdict,
                              fix_facts: bool | None, budget: Budget) -> PostVerdict:
@@ -212,8 +257,25 @@ class FactCheckService:
                     continue
                 hits.extend(hit for hit in found if hit.url not in seen_urls)
 
-            hits = _dedupe_hits(hits)[: self.settings.fc_top_hits]
-            if not hits:
+            hits = _dedupe_hits(hits)
+            # GDELT — независимый новостной индекс, полезен для событий
+            if self.gdelt is not None and cycle == 1:
+                query_text = claim.search_queries[0] if claim.search_queries else claim.text
+                try:
+                    gdelt_hits = await self.gdelt.search(query_text)
+                    if gdelt_hits:
+                        hits = _dedupe_hits(hits + gdelt_hits)
+                except Exception as exc:
+                    print(f"[fc.gdelt] {exc}")
+            hits = hits[: self.settings.fc_top_hits]
+            # World Bank API — точные значения для числовых утверждений
+            stat_snippets: list[Snippet] = []
+            if self.worldbank is not None:
+                try:
+                    stat_snippets = await self.worldbank.lookup(claim)
+                except Exception as exc:
+                    print(f"[fc.wb] {exc}")
+            if not hits and not stat_snippets:
                 if attempts and failures == attempts:
                     # Это не «не подтверждено», а «не смогли проверить».
                     best = best or ClaimVerdict(claim=claim, status=Status.NOT_FOUND,
@@ -236,8 +298,11 @@ class FactCheckService:
                     snippets.append(Snippet(url=hit.url, domain=domain_of(hit.url),
                                             quote=hit.snippet, title=hit.title,
                                             published=hit.published))
+            if stat_snippets:
+                snippets.extend(stat_snippets)
+                consulted.add("worldbank.org")
             consulted.update(snippet.domain for snippet in snippets)
-            snippets = _dedupe_snippets(snippets)[: self.settings.fc_snippets_per_claim * 2]
+            snippets = _dedupe_snippets(snippets)[: self.settings.fc_snippets_per_claim * 3]
             if not snippets:
                 best = best or ClaimVerdict(claim=claim, status=Status.NOT_FOUND,
                                             note="страницы не извлеклись", cycles=cycle)

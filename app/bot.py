@@ -327,8 +327,25 @@ class AdminBot:
                 wait_task = asyncio.create_task(
                     self._wait_verdicts(missing, self.settings.fc_wait_s))
 
-        # перевод и ожидание медиарелея — параллельно
-        translate_task = asyncio.create_task(llm.translate_many([c[4] for c in cands]))
+        # сначала дожидаемся проверок, чтобы переводить уже исправленный текст
+        if wait_task is not None:
+            await wait_task
+            for qid, verdict in verdicts.items():
+                if verdict is None and self.fc_repo is not None:
+                    verdicts[qid] = self.fc_repo.load(qid)
+
+        english_texts = []
+        for qid, _username, _ids, _key, text, *_rest in cands:
+            verdict = verdicts.get(qid)
+            english = None
+            if verdict is not None and verdict.corrected_text:
+                english = verdict.corrected_text
+            elif self.fc_repo is not None and self.fc_mode != "off":
+                english = self.fc_repo.load_en_text(qid)
+            english_texts.append(english or text)
+
+        # финальный русский текст — из английского (или исправленного английского)
+        translate_task = asyncio.create_task(llm.translate_many(english_texts))
         created = []
         for qid, username, ids, key, text, views, reactions, ts, has_media in cands:
             if not has_media:
@@ -348,11 +365,6 @@ class AdminBot:
         delivered = 0
         pending_fc = 0
         results = await translate_task
-        if wait_task is not None:
-            await wait_task
-            for qid, verdict in verdicts.items():
-                if verdict is None and self.fc_repo is not None:
-                    verdicts[qid] = self.fc_repo.load(qid)
         for (qid, username, ids, key, text, views, reactions, ts, has_media), out in zip(cands, results):
             if delivered >= n:
                 break
@@ -407,7 +419,9 @@ class AdminBot:
         """
         if self.fc_mode != "on":
             return
-        widget = render_widget(verdict, limit=10) if verdict is not None else None
+        widget = (render_widget(verdict, limit=10,
+                                localized=verdict.localized if verdict else None)
+                  if verdict is not None else None)
         if not widget:
             widget = "🔎 <b>Фактчекинг</b>: проверка идёт, результаты появятся здесь."
         markup = None
@@ -582,6 +596,8 @@ class AdminBot:
     def _verdict_text(self, verdict: PostVerdict) -> str:
         markers = {"supported": "✅", "partial": "◐", "not_found": "❔",
                    "contested": "⚠️", "refuted": "🚫", "skipped": "—"}
+        loc = verdict.localized or {}
+        loc_claims = {int(item.get("idx", -1)): item for item in loc.get("claims", [])}
         status = STATUS_RU.get(verdict.status.value, verdict.status.value)
         lines = [f"<b>Проверка</b> qid={verdict.qid}: <b>{status}</b>"]
         if verdict.corrected_text:
@@ -595,8 +611,9 @@ class AdminBot:
             ctype = TYPE_RU.get(item.claim.ctype.value, item.claim.ctype.value)
             priority = PRIORITY_RU.get(item.claim.priority.value, item.claim.priority.value)
             coverage = f" · источников: {item.coverage}" if item.coverage else ""
+            text = loc_claims.get(item.claim.idx, {}).get("text") or item.claim.text
             lines.append(f"{marker} <i>{ctype} · {priority}{coverage}</i> "
-                         f"{html.escape(item.claim.text[:160])}")
+                         f"{html.escape(text[:160])}")
             if item.error:
                 lines.append(f"    <i>{html.escape(item.error[:120])}</i>")
             for evidence in item.evidence[:2]:
@@ -648,6 +665,14 @@ class AdminBot:
                                              for chat_id, msg_id, _kind in cards]
 
         if self.fc_mode == "on":
+            if verdict.corrected_text:
+                try:
+                    translated = await llm.translate(verdict.corrected_text)
+                    if translated:
+                        self.store.set_ru_text(qid, translated)
+                        post = self.store.post_by_qid(qid) or post
+                except Exception as exc:
+                    print(f"[fc] late translate {qid}: {exc}")
             body = self._body(post, verdict)
             tag = self._low_tag(verdict)
             for chat_id, msg_id in text_cards:
