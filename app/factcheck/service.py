@@ -303,7 +303,8 @@ class FactCheckService:
                                             quote=hit.snippet, title=hit.title,
                                             published=hit.published))
             if stat_snippets:
-                snippets.extend(stat_snippets)
+                # первоисточник статистики — в начало, иначе его срезает лимит фрагментов
+                snippets = stat_snippets + snippets
                 consulted.add("worldbank.org")
             consulted.update(snippet.domain for snippet in snippets)
             snippets = _dedupe_snippets(snippets)[: self.settings.fc_snippets_per_claim * 3]

@@ -1364,3 +1364,35 @@ def test_search_retries_without_time_range():
     hits = asyncio.run(client.search(Query(text="x", language="en", time_range="week")))
     assert len(hits) == 1
     assert len(calls) == 2 and "time_range" not in calls[1]
+
+
+def test_stat_snippets_reach_judge_first():
+    from app.factcheck.service import FactCheckService
+
+    class FakeWorldBank:
+        async def lookup(self, claim):
+            return [Snippet(url="https://data.worldbank.org/indicator/X",
+                            domain="worldbank.org", quote="Mexico remittances 2000: 7.5 bn")]
+
+    class CaptureJudge:
+        def __init__(self):
+            self.domains = []
+
+        async def judge(self, claim, snippets, **kwargs):
+            self.domains = [s.domain for s in snippets]
+            return ClaimVerdict(claim=claim, status=Status.NOT_FOUND)
+
+    claim = core_claim("Remittances to Mexico in 2000", ctype=ClaimType.NUMERIC,
+                       numbers=("2000",))
+    judge = CaptureJudge()
+    service = FactCheckService(
+        settings=make_settings(), repo=None, search=FakeSearch(HITS),
+        fetcher=FakeFetch(DOCS), judge=judge,
+        extractor=ClaimExtractor(FakeLlm({"claims": [{
+            "text": "Remittances to Mexico in 2000", "ctype": "numeric",
+            "priority": "core", "entities": ["Mexico"], "numbers": ["2000"],
+            "lang": "en", "queries": ["Mexico remittances 2000"]}]}), FakePrompts(),
+            max_claims=2),
+        prompts=FakePrompts(), worldbank=FakeWorldBank())
+    asyncio.run(service.check_text("text", tier="t1"))
+    assert judge.domains[0] == "worldbank.org"
