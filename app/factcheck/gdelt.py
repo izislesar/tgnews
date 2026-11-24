@@ -15,6 +15,7 @@ API = "https://api.gdeltproject.org/api/v2/doc/doc"
 class GdeltSearch:
     def __init__(self, *, timeout: float = 20.0, max_records: int = 20,
                  timespan: str = "14d"):
+        self._disabled_until = 0.0
         self.timeout = timeout
         self.max_records = max_records
         self.timespan = timespan
@@ -25,7 +26,9 @@ class GdeltSearch:
             return json.loads(response.read().decode("utf-8", errors="replace"))
 
     async def search(self, query: str) -> list[Hit]:
-        if not query.strip():
+        import time as _time
+
+        if not query.strip() or _time.time() < self._disabled_until:
             return []
         params = {
             "query": query,
@@ -42,7 +45,10 @@ class GdeltSearch:
                 break
             except Exception as exc:
                 status = getattr(exc, "code", None)
-                if status == 429 and attempt < 2:
+                if status == 429:
+                    # нас уже режет: не тратим время на каждый пост
+                    self._disabled_until = _time.time() + 3600
+                if status == 429 and attempt < 1:
                     await asyncio.sleep(3 * (attempt + 1))
                     continue
                 print(f"[gdelt] {type(exc).__name__}: {str(exc)[:100]}")

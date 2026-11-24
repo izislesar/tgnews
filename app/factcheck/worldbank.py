@@ -47,9 +47,11 @@ _NUM = re.compile(r"\d[\d\s.,]*")
 
 
 class WorldBankStats:
-    def __init__(self, *, timeout: float = 15.0):
+    def __init__(self, *, timeout: float = 20.0):
         self.timeout = timeout
         self._cache: dict[tuple, Snippet | None] = {}
+        # API любит отдавать 403 при параллельных запросах — сериализуем
+        self._sem = asyncio.Semaphore(1)
 
     def _fetch(self, url: str) -> dict | None:
         request = urllib.request.Request(url, headers={"User-Agent": "tgnews/1.0"})
@@ -90,7 +92,8 @@ class WorldBankStats:
             if key not in self._cache:
                 url = (f"{API}/country/{country}/indicator/{code}"
                        f"?format=json&date={year_value}&per_page=1")
-                data = await asyncio.to_thread(self._fetch, url)
+                async with self._sem:
+                    data = await asyncio.to_thread(self._fetch, url)
                 snippet = None
                 try:
                     row = data[1][0]
@@ -106,6 +109,8 @@ class WorldBankStats:
                 except Exception:
                     snippet = None
                 self._cache[key] = snippet
+                if snippet:
+                    print(f"[fc.wb] {country} {code} {year_value}: {snippet.quote[:80]}")
             if self._cache[key]:
                 snippets.append(self._cache[key])
         return snippets
