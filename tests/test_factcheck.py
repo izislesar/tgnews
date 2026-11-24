@@ -1499,3 +1499,24 @@ def test_widget_for_skipped_post_says_no_claims(monkeypatch):
                                                     claims=[])))
     assert sent and "проверяемых утверждений" in sent[0]
     assert "идёт" not in sent[0]
+
+
+def test_widget_says_not_confirmed_when_sources_were_read():
+    from app.factcheck.widget import render_widget
+
+    verdict = PostVerdict(qid=1, status=Status.NOT_FOUND, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
+                     coverage=6, evidence=[evidence_for("reuters.com")])])
+    text = render_widget(verdict)
+    assert "не подтверждено" in text
+    assert "недостаточно данных" not in text
+
+
+def test_widget_says_insufficient_when_coverage_low():
+    from app.factcheck.widget import render_widget
+
+    verdict = PostVerdict(qid=1, status=Status.NOT_FOUND, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
+                     coverage=1)])
+    text = render_widget(verdict)
+    assert "недостаточно данных" in text

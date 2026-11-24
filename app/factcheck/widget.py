@@ -86,8 +86,13 @@ def render_widget(verdict: PostVerdict, *, limit: int = 10,
     reviewed = max((item.coverage for item in verdict.claims
                     if item.claim.is_core), default=0)
     header = "🔎 <b>Фактчекинг</b>"
-    header += (": <b>%d%%</b>" % round(score * 100)) if score is not None \
-        else ": недостаточно данных"
+    if score is not None:
+        header += ": <b>%d%%</b>" % round(score * 100)
+    else:
+        checked = any(item.claim.is_core and item.status is Status.NOT_FOUND
+                      and item.coverage >= policy.MIN_COVERAGE
+                      for item in verdict.claims)
+        header += ": не подтверждено" if checked else ": недостаточно данных"
     pages = reviewed or (len(media) + len(stat))
     header += f" · страниц: {pages} · независимых: {len(media)}"
     if stat:
