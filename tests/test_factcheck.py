@@ -1343,3 +1343,24 @@ def test_disclaimer_uses_localized_claim_text():
                      coverage=5)])
     text = policy.render_disclaimer(verdict, claim_texts={0: "Погибло 29 человек"})
     assert "Погибло 29 человек" in text
+
+
+def test_search_retries_without_time_range():
+    from app.factcheck.searxng import SearxngSearch
+    from app.factcheck.models import Query
+
+    client = SearxngSearch("http://searx:8080", engines="bing,brave,mojeek")
+    calls = []
+
+    async def fake_get(params):
+        calls.append(dict(params))
+        if params.get("time_range"):
+            return {"results": [], "unresponsive_engines": []}
+        return {"results": [{"url": "https://www.reuters.com/a", "title": "t",
+                             "content": "c", "engine": "bing", "score": 1.0}],
+                "unresponsive_engines": []}
+
+    client._get = fake_get
+    hits = asyncio.run(client.search(Query(text="x", language="en", time_range="week")))
+    assert len(hits) == 1
+    assert len(calls) == 2 and "time_range" not in calls[1]

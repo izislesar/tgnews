@@ -111,6 +111,13 @@ class SearxngSearch:
             parent["time_range"] = query.time_range
 
         hits = await self._first_working(parent)
+        if not hits and parent.get("time_range"):
+            # узкий временной фильтр часто даёт ноль по нишевым темам — повторяем без него
+            broad = {k: v for k, v in parent.items() if k != "time_range"}
+            try:
+                hits = await self._first_working(broad)
+            except Exception:
+                hits = []
         self._cache[key] = (now, list(hits))
         return hits
 
