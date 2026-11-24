@@ -97,7 +97,7 @@ class Settings:
 
     # --- загрузка страниц ---
     fetch_timeout: float = 12.0
-    fetch_max_bytes: int = 2_000_000
+    fetch_max_bytes: int = 1_000_000
     fetch_concurrency: int = 3
     fetch_min_interval: float = 1.0  # вежливость: не чаще 1 запроса/сек на хост
     user_agent: str = DEFAULT_USER_AGENT
@@ -106,10 +106,10 @@ class Settings:
     fc_mode: str = "off"  # off | shadow | on
     fc_cycles: int = 2
     fc_max_claims: int = 6
-    fc_deadline_s: float = 150.0
+    fc_deadline_s: float = 120.0
     fc_calls_per_post: int = 12
     fc_judge_concurrency: int = 3
-    fc_top_hits: int = 10
+    fc_top_hits: int = 6
     fc_snippets_per_claim: int = 4
     fc_min_text: int = 200
     fc_local_timeout: float = 8.0

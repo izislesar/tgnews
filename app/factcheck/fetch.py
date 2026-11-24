@@ -75,6 +75,9 @@ def _fallback_extract(raw: bytes) -> tuple[str, str]:
 def extract_document(url: str, raw: bytes, *, min_text: int = 200) -> Document | None:
     """Чистая функция: байты страницы -> документ (тестируется без сети)."""
     text, title, lang, published, sitename = "", "", None, None, None
+    # таблицы включаем только на небольших страницах: на гигантских таблицах
+    # lxml/trafilatura раздувают память и роняют контейнер на 1 vCPU
+    include_tables = len(raw) <= 500_000
     for favor_precision in (True, False):
         try:
             doc = trafilatura.bare_extraction(
@@ -82,7 +85,7 @@ def extract_document(url: str, raw: bytes, *, min_text: int = 200) -> Document |
                 url=url,
                 with_metadata=True,
                 include_comments=False,
-                include_tables=True,
+                include_tables=include_tables,
                 favor_precision=favor_precision,
             )
         except Exception:
@@ -109,7 +112,7 @@ def extract_document(url: str, raw: bytes, *, min_text: int = 200) -> Document |
         return None
     return Document(
         url=url,
-        text=text[:30_000],
+        text=text[:20_000],
         title=title[:300],
         lang=lang,
         published=published,

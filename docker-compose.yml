@@ -33,7 +33,8 @@ services:
 
   app:
     build: .
-    restart: unless-stopped
+    # on-failure:3 — при падении не зацикливаемся и не выжираем хост
+    restart: on-failure:3
     env_file: .env
     environment:
       - TZ=Europe/Berlin
