@@ -1396,3 +1396,16 @@ def test_stat_snippets_reach_judge_first():
         prompts=FakePrompts(), worldbank=FakeWorldBank())
     asyncio.run(service.check_text("text", tier="t1"))
     assert judge.domains[0] == "worldbank.org"
+
+
+def test_worldbank_picks_recipient_country():
+    from app.factcheck.worldbank import WorldBankStats
+
+    wb = WorldBankStats()
+    claim = Claim(idx=0, text="Remittances from the United States to Mexico in 2000 "
+                              "were 10.5 billion USD",
+                  ctype=ClaimType.NUMERIC, priority=Priority.CORE, numbers=["2000"])
+    assert wb._country(claim) == "MEX"
+    claim2 = Claim(idx=0, text="Remittances received in Mexico from the USA in 2010",
+                   ctype=ClaimType.NUMERIC, priority=Priority.CORE, numbers=["2010"])
+    assert wb._country(claim2) == "MEX"

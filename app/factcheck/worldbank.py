@@ -63,11 +63,21 @@ class WorldBankStats:
             return None
 
     def _country(self, claim: Claim) -> str | None:
+        """Страна-получатель: для «переводов в Мексику» это Мексика, а не США."""
         text = " ".join([claim.text, *claim.entities]).lower()
-        for name, code in sorted(COUNTRY_HINTS.items(), key=lambda item: -len(item[0])):
-            if name in text:
+        matches: list[tuple[int, str]] = []
+        for name, code in COUNTRY_HINTS.items():
+            for found in re.finditer(rf"\b{re.escape(name)}\b", text):
+                matches.append((found.start(), code))
+        if not matches:
+            return None
+        matches.sort()
+        # приоритет — страна после «to/in/into/for» (получатель), иначе последняя
+        for position, code in reversed(matches):
+            prefix = text[max(0, position - 24):position]
+            if re.search(r"\b(to|in|into|for)\s+$", prefix):
                 return code
-        return None
+        return matches[-1][1]
 
     def _indicator(self, claim: Claim) -> tuple[str, str] | None:
         text = " ".join([claim.text, *claim.entities]).lower()
