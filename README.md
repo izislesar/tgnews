@@ -311,7 +311,12 @@ SearXNG поднимается сервисом `searxng` в `docker-compose.yml
 `docker compose ps` показывает `healthy`; если `app` ушёл в `unhealthy`,
 `restart: unless-stopped` перезапустит его.
 
-**Память.** Лимиты: `app` — 800 МБ, `searxng` — 350 МБ (сервер 1.9 ГБ, swap нет).
+**Память.** Лимиты: `app` — 650 МБ, `searxng` — 250 МБ. На сервере 1.9 ГБ и
+**обязателен swap** (`bash deploy/swap.sh` добавляет 2 ГБ) — без него пиковый
+прогон может уронить userspace целиком (sshd перестаёт отдавать баннер, HTTP
+молчит, хотя ping и порты живы). Тяжёлые ручные прогоны запускать не через
+`docker compose exec` в рабочий контейнер, а отдельно:
+`docker run --rm --memory=300m --env-file .env -v $PWD/data:/data tgnews-app python -m app.factcheck.cli ...`.
 Приложение держит ~500 МБ RSS (Telethon + aiogram + lxml/trafilatura), поэтому
 `MALLOC_ARENA_MAX=2` и `FETCH_CONCURRENCY=2` — это сознательные настройки, не
 меняй их без замера. Если `app` упирается в лимит — первым делом снижай

@@ -10,7 +10,7 @@ services:
       - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
     expose:
       - "8080"
-    mem_limit: 350m
+    mem_limit: 250m
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -47,7 +47,7 @@ services:
       - ./prompt.txt:/app/prompt.txt:ro
     depends_on:
       - searxng
-    mem_limit: 800m
+    mem_limit: 650m
     healthcheck:
       test: ["CMD", "python", "-c",
              "import os,sys,time; sys.exit(0 if time.time()-os.path.getmtime('/tmp/health')<300 else 1)"]
