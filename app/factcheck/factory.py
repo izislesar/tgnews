@@ -40,6 +40,7 @@ def build_service(
             timeout=settings.searx_timeout,
             results=settings.search_results,
             concurrency=settings.search_concurrency,
+            engines=settings.searx_engines,
             fallback_engines=settings.searx_fallback_engines,
         ),
         fetcher=HttpFetcher(

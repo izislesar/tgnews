@@ -45,6 +45,24 @@ def independent_sources(verdict: PostVerdict, *, limit: int = 10) -> list[tuple[
     return out
 
 
+def statistical_sources(verdict: PostVerdict, *, limit: int = 5) -> list[tuple[str, str]]:
+    """Первоисточники статистики: World Bank, МВФ, Росстат и т.п."""
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for item in verdict.claims:
+        for evidence in item.evidence:
+            domain = evidence.domain
+            if not domain or domain in seen:
+                continue
+            if evidence.publisher_group not in policy.STAT_GROUPS:
+                continue
+            seen.add(domain)
+            out.append((domain, evidence.url))
+            if len(out) >= limit:
+                return out
+    return out
+
+
 def _esc(text: str) -> str:
     return html.escape(text, quote=False)
 
@@ -53,7 +71,8 @@ def render_widget(verdict: PostVerdict, *, limit: int = 10) -> str | None:
     """Текст виджета (HTML). None — показывать нечего."""
     if not verdict.claims:
         return None
-    sources = independent_sources(verdict, limit=limit)
+    media = independent_sources(verdict, limit=limit)
+    stat = statistical_sources(verdict)
     score = policy.correctness_score(verdict)
 
     if verdict.degraded:
@@ -62,12 +81,12 @@ def render_widget(verdict: PostVerdict, *, limit: int = 10) -> str | None:
     reviewed = max((item.coverage for item in verdict.claims
                     if item.claim.is_core), default=0)
     header = "🔎 <b>Фактчекинг</b>"
-    if score is None:
-        header += f": недостаточно данных · источников: {reviewed or len(sources)}"
-    else:
-        header += f": <b>{round(score * 100)}%</b> · источников: {reviewed or len(sources)}"
-    if not sources and reviewed:
-        header += " (независимых не найдено)"
+    header += (": <b>%d%%</b>" % round(score * 100)) if score is not None \
+        else ": недостаточно данных"
+    pages = reviewed or (len(media) + len(stat))
+    header += f" · страниц: {pages} · независимых: {len(media)}"
+    if stat:
+        header += f" · статистика: {len(stat)}"
     lines = [header]
 
     counts: dict[Status, int] = {}
@@ -107,8 +126,9 @@ def render_widget(verdict: PostVerdict, *, limit: int = 10) -> str | None:
     if insufficient:
         lines.append(f"ℹ️ по {insufficient} утверждени{'ю' if insufficient == 1 else 'ям'} "
                      f"источников меньше {policy.MIN_COVERAGE} — вывод не делался")
-    if sources:
-        links = ", ".join(f'<a href="{html.escape(url)}">{_esc(domain)}</a>'
-                          for domain, url in sources)
-        lines.append(f"<b>Источники:</b> {links}")
+    links = [f'<a href="{html.escape(url)}">{_esc(domain)}</a>' for domain, url in media]
+    links += [f'<a href="{html.escape(url)}">{_esc(domain)}</a> <i>(стат.)</i>'
+              for domain, url in stat]
+    if links:
+        lines.append(f"<b>Источники:</b> {', '.join(links)}")
     return "\n".join(lines)

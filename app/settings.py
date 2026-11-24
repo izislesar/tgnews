@@ -91,6 +91,7 @@ class Settings:
     searx_timeout: float = 20.0
     search_concurrency: int = 2
     search_results: int = 20
+    searx_engines: str = "bing,brave,yandex"   # основной набор: объединяется за один запрос
     searx_fallback_engines: str = "bing"
 
     # --- загрузка страниц ---
@@ -161,6 +162,8 @@ class Settings:
             searx_timeout=_float(env, "SEARX_TIMEOUT", defaults.searx_timeout),
             search_concurrency=_int(env, "SEARCH_CONCURRENCY", defaults.search_concurrency),
             search_results=_int(env, "SEARCH_RESULTS", defaults.search_results),
+            searx_engines=_get(env, "SEARX_ENGINES", defaults.searx_engines)
+            or defaults.searx_engines,
             searx_fallback_engines=_get(env, "SEARX_FALLBACK_ENGINES",
                                         defaults.searx_fallback_engines)
             or defaults.searx_fallback_engines,

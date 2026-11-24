@@ -983,7 +983,7 @@ def test_search_empty_from_fallback_is_not_an_outage():
 
     async def fake_get(params):
         calls.append(params)
-        if "engines" not in params:
+        if params.get("engines") == client.engines and "," in params.get("engines", ""):
             return {"results": [], "unresponsive_engines": [["google cse", "Suspended"]]}
         return {"results": [], "unresponsive_engines": []}  # bing ответил, пусто
 
@@ -1181,3 +1181,60 @@ def test_pending_widget_is_shown(monkeypatch):
     monkeypatch.setattr(bot.bot, "send_message", fake_send)
     asyncio.run(bot._send_widget(1, 42, None))
     assert sent and "проверка идёт" in sent[0]
+
+
+def test_search_sends_engine_set():
+    from app.factcheck.searxng import SearxngSearch
+    from app.factcheck.models import Query
+
+    client = SearxngSearch("http://searx:8080", engines="bing,brave,yandex")
+    parts = []
+
+    async def fake_get(params):
+        parts.append(params)
+        return {"results": [], "unresponsive_engines": []}
+
+    client._get = fake_get
+    asyncio.run(client.search(Query(text="x")))
+    assert parts[0]["engines"] == "bing,brave,yandex"
+
+
+def test_statistical_source_confirms_numeric_claim():
+    claim = core_claim("Переводы в Мексику составили 65,5 млрд", ctype=ClaimType.NUMERIC,
+                       numbers=("65,5",))
+    stat = Evidence(url="https://banxico.org.mx/a", domain="banxico.org.mx",
+                    publisher_group="stat-official")
+    verdict = ClaimVerdict(claim=claim, status=Status.SUPPORTED, confidence=0.9,
+                           coverage=6, evidence=[stat])
+    assert policy.confirmation_ok(verdict) is True
+
+    wrong = ClaimVerdict(claim=claim, status=Status.REFUTED, confidence=0.9,
+                         coverage=6, evidence=[stat])
+    assert policy.correction_eligible(wrong, min_confidence=0.7) is True
+
+
+def test_statistical_source_cannot_confirm_quote():
+    claim = core_claim("Министр заявил о росте переводов",
+                       ctype=ClaimType.ATTRIBUTED)
+    stat = Evidence(url="https://worldbank.org/a", domain="worldbank.org",
+                    publisher_group="stat-official")
+    verdict = ClaimVerdict(claim=claim, status=Status.SUPPORTED, confidence=0.9,
+                           coverage=6, evidence=[stat])
+    assert policy.confirmation_ok(verdict) is False
+
+
+def test_widget_separates_independent_and_statistics():
+    from app.factcheck.widget import render_widget
+
+    claim = core_claim("Переводы в Мексику 65,5 млрд", ctype=ClaimType.NUMERIC,
+                       numbers=("65,5",))
+    verdict = PostVerdict(qid=1, claims=[
+        ClaimVerdict(claim=claim, status=Status.PARTIAL, confidence=0.8, coverage=6,
+                     evidence=[evidence_for("reuters.com"),
+                               Evidence(url="https://banxico.org.mx/a",
+                                        domain="banxico.org.mx",
+                                        publisher_group="stat-official")])])
+    text = render_widget(verdict)
+    assert "независимых: 1" in text
+    assert "статистика: 1" in text
+    assert "(стат.)" in text and "banxico.org.mx" in text

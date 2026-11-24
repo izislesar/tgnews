@@ -59,6 +59,15 @@ def _fallback_extract(raw: bytes) -> tuple[str, str]:
         text = _WS.sub(" ", node.text_content()).strip()
         if len(text) >= 40:
             paragraphs.append(text)
+    # таблицы: строки вида «2000 | 10.5» — без них статистика теряется
+    for row in tree.iter("tr"):
+        cells = [_WS.sub(" ", cell.text_content()).strip()
+                 for cell in row.iter("td", "th")]
+        cells = [cell for cell in cells if cell]
+        if len(cells) >= 2:
+            line = " | ".join(cells)
+            if len(line) >= 8:
+                paragraphs.append(line)
     body = "\n".join(paragraphs[:40])
     return title, (desc + "\n\n" + body).strip()
 
@@ -73,7 +82,7 @@ def extract_document(url: str, raw: bytes, *, min_text: int = 200) -> Document |
                 url=url,
                 with_metadata=True,
                 include_comments=False,
-                include_tables=False,
+                include_tables=True,
                 favor_precision=favor_precision,
             )
         except Exception:
@@ -106,6 +115,26 @@ def extract_document(url: str, raw: bytes, *, min_text: int = 200) -> Document |
         published=published,
         sitename=sitename,
     )
+
+
+def _number_windows(text: str, numbers: list[str], *, width: int = 700) -> list[str]:
+    """Окна вокруг самих чисел: «10,5» может стоять в таблице, а не в тексте."""
+    low = text.lower()
+    out: list[str] = []
+    for number in numbers:
+        raw = number.replace(" ", "")
+        variants = {raw, raw.replace(",", "."), raw.replace(".", ",")}
+        for variant in variants:
+            if not variant:
+                continue
+            index = low.find(variant.lower())
+            if index < 0:
+                continue
+            start = max(0, index - width // 2)
+            end = min(len(text), index + width // 2)
+            out.append(text[start:end])
+            break
+    return out
 
 
 def select_snippets(doc: Document, claim: Claim, *, k: int = 3,
@@ -152,6 +181,14 @@ def select_snippets(doc: Document, claim: Claim, *, k: int = 3,
         out.append(Snippet(url=doc.url, domain=domain, quote=lead, title=doc.title,
                            published=doc.published))
         seen.add(lead[:60].lower())
+    # для числовых утверждений сначала окна вокруг самих чисел (в т.ч. строк таблиц)
+    for window in _number_windows(doc.text, numbers):
+        fingerprint = window[:60].lower()
+        if fingerprint in seen or len(out) >= k:
+            continue
+        seen.add(fingerprint)
+        out.append(Snippet(url=doc.url, domain=domain, quote=window, title=doc.title,
+                           published=doc.published))
     for _, window in scored:
         fingerprint = window[:60].lower()
         if fingerprint in seen:

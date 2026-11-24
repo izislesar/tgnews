@@ -191,6 +191,24 @@ PUBLISHER_GROUPS: dict[str, str] = {
     "news.cn": "cn-state",
     "xinhuanet.com": "cn-state",
     "globaltimes.cn": "cn-state",
+    # статистика: первоисточники данных, не СМИ
+    "worldbank.org": "stat-official",
+    "imf.org": "stat-official",
+    "oecd.org": "stat-official",
+    "unstats.un.org": "stat-official",
+    "ilostat.ilo.org": "stat-official",
+    "rosstat.gov.ru": "stat-official",
+    "gks.ru": "stat-official",
+    "banxico.org.mx": "stat-official",
+    "inegi.org.mx": "stat-official",
+    "bls.gov": "stat-official",
+    "census.gov": "stat-official",
+    "ons.gov.uk": "stat-official",
+    "destatis.de": "stat-official",
+    "insee.fr": "stat-official",
+    # агрегаторы статистики — не первоисточник
+    "statista.com": "stat-aggregator",
+    "ourworldindata.org": "stat-aggregator",
     # энциклопедии — только как фон, не подтверждение
     "wikipedia.org": "reference",
 }
@@ -217,6 +235,8 @@ MIN_COVERAGE = 5
 # Одного сообщения агентства достаточно: это отраслевая норма и не плодит
 # «не подтверждено» на каждом реальном событии.
 SUFFICIENT_SINGLE_GROUPS = {"agencies-west", "agencies-regional"}
+# Официальная статистика (World Bank, МВФ, Росстат...) — первоисточник для чисел и дат.
+STAT_GROUPS = {"stat-official"}
 
 # Чем важнее статус, тем выше приоритет при агрегации по посту.
 _SEVERITY = {
@@ -265,6 +285,10 @@ def needed_groups(verdict: ClaimVerdict) -> int:
     """
     if verdict.claim.ctype in (ClaimType.ATTRIBUTED, ClaimType.QUOTE):
         return 1
+    # число/дата из официальной статистики — это первый источник данных, его хватает
+    if verdict.claim.ctype in (ClaimType.NUMERIC, ClaimType.DATE) \
+            and stat_evidence_domains(verdict):
+        return 1
     if independent_groups(verdict.evidence) & SUFFICIENT_SINGLE_GROUPS:
         return 1
     return MIN_GROUPS
@@ -279,6 +303,12 @@ def independent_evidence_domains(verdict: ClaimVerdict) -> set[str]:
     """Разные независимые ИЗДАНИЯ. Две редакции внутри одной группы — тоже два источника."""
     return {evidence.domain for evidence in verdict.evidence
             if evidence.domain and evidence.publisher_group in INDEPENDENT_GROUPS}
+
+
+def stat_evidence_domains(verdict: ClaimVerdict) -> set[str]:
+    """Первоисточники статистики: World Bank, МВФ, Росстат и т.п."""
+    return {evidence.domain for evidence in verdict.evidence
+            if evidence.domain and evidence.publisher_group in STAT_GROUPS}
 
 
 def correction_eligible(verdict: ClaimVerdict, *, min_confidence: float = 0.8) -> bool:
@@ -296,11 +326,15 @@ def correction_eligible(verdict: ClaimVerdict, *, min_confidence: float = 0.8) -
     if verdict.confidence < min_confidence:
         return False
     domains = independent_evidence_domains(verdict)
-    if not domains:
+    stat_domains = stat_evidence_domains(verdict)
+    if not domains and not stat_domains:
         return False
     if verdict.claim.ctype in (ClaimType.ATTRIBUTED, ClaimType.QUOTE):
+        return bool(domains)
+    # числа и даты можно исправлять по официальной статистике — это первоисточник
+    if verdict.claim.ctype in (ClaimType.NUMERIC, ClaimType.DATE) and stat_domains:
         return True
-    # числа/даты/события: достаточно агентства или двух разных независимых изданий
+    # остальное: агентство или два разных независимых издания
     if any(evidence.publisher_group in SUFFICIENT_SINGLE_GROUPS
            for evidence in verdict.evidence if evidence.domain in domains):
         return True
@@ -317,7 +351,12 @@ def confirmation_ok(verdict: ClaimVerdict) -> bool:
         return False
     if verdict.confidence < MIN_CONFIDENCE:
         return False
-    return len(independent_groups(verdict.evidence)) >= needed_groups(verdict)
+    groups = independent_groups(verdict.evidence)
+    # цитату/заявление не может подтвердить статистическая таблица
+    if verdict.claim.ctype in (ClaimType.ATTRIBUTED, ClaimType.QUOTE) \
+            and groups and groups <= STAT_GROUPS:
+        return False
+    return len(groups) >= needed_groups(verdict)
 
 
 def effective_status(verdict: ClaimVerdict) -> Status:
