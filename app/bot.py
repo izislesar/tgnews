@@ -419,11 +419,12 @@ class AdminBot:
         """
         if self.fc_mode != "on":
             return
-        widget = (render_widget(verdict, limit=10,
-                                localized=verdict.localized if verdict else None)
-                  if verdict is not None else None)
-        if not widget:
+        if verdict is None:
             widget = "🔎 <b>Фактчекинг</b>: проверка идёт, результаты появятся здесь."
+        else:
+            widget = (render_widget(verdict, limit=10,
+                                    localized=verdict.localized)
+                      or "🔎 <b>Фактчекинг</b>: проверяемых утверждений в посте нет.")
         markup = None
         if qid:
             markup = InlineKeyboardMarkup(inline_keyboard=[[
@@ -520,9 +521,9 @@ class AdminBot:
             return None
 
     def _body(self, post: dict, verdict: PostVerdict | None) -> str:
-        # вариант 2: если пост переписан под корректные данные — публикуем его
-        ru = ((verdict.corrected_text if verdict and verdict.corrected_text else None)
-              or post.get("ru_text") or post.get("text") or "")
+        # corrected_text — английский (рабочий язык пайплайна). В посте всегда
+        # русский ru_text: он уже переведён с исправленного английского.
+        ru = post.get("ru_text") or post.get("text") or ""
         ids = post.get("ids") or ""
         url = f"https://t.me/{post.get('username')}/{ids.split(',')[0]}"
         body = fmt_html(ru) + "\n" * self.link_gap + f'<a href="{url}">{url}</a>'
@@ -598,6 +599,7 @@ class AdminBot:
                    "contested": "⚠️", "refuted": "🚫", "skipped": "—"}
         loc = verdict.localized or {}
         loc_claims = {int(item.get("idx", -1)): item for item in loc.get("claims", [])}
+        loc_corr = {int(item.get("idx", -1)): item for item in loc.get("corrections", [])}
         status = STATUS_RU.get(verdict.status.value, verdict.status.value)
         lines = [f"<b>Проверка</b> qid={verdict.qid}: <b>{status}</b>"]
         if verdict.corrected_text:
@@ -626,8 +628,11 @@ class AdminBot:
             lines.append("<b>Исправлено:</b>")
             for item in verdict.corrections[:5]:
                 domain = urlparse(item.source_url).netloc
-                lines.append(f"• {html.escape(item.old[:70])} → "
-                             f"{html.escape(item.new[:70])} <i>({html.escape(domain)})</i>")
+                localized_item = loc_corr.get(item.claim_idx, {})
+                old = localized_item.get("old") or item.old
+                new = localized_item.get("new") or item.new
+                lines.append(f"• {html.escape(old[:70])} → "
+                             f"{html.escape(new[:70])} <i>({html.escape(domain)})</i>")
         if any(not item.corrected and item.coverage < policy.MIN_COVERAGE
                and item.status is not Status.SUPPORTED for item in verdict.claims):
             lines.append("")

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import html
+from urllib.parse import urlparse
 
 from . import policy
 from .models import ClaimType, PostVerdict, Status
@@ -129,6 +130,15 @@ def render_widget(verdict: PostVerdict, *, limit: int = 10,
         lines.append("<b>Что не совпало:</b>")
         lines.extend(mismatches[:3])
 
+    if verdict.corrections:
+        lines.append("<b>Исправлено:</b>")
+        for item in verdict.corrections[:3]:
+            loc_item = loc_corr.get(item.claim_idx, {})
+            old = loc_item.get("old") or item.old
+            new = loc_item.get("new") or item.new
+            domain = urlparse(item.source_url).netloc
+            lines.append(f"• {_esc(old[:70])} → {_esc(new[:70])}"
+                         f" <i>({_esc(domain)})</i>")
     if insufficient:
         lines.append(f"ℹ️ по {insufficient} утверждени{'ю' if insufficient == 1 else 'ям'} "
                      f"источников меньше {policy.MIN_COVERAGE} — вывод не делался")

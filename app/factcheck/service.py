@@ -201,7 +201,10 @@ class FactCheckService:
                  for item in localized.get("claims", [])}
         summary = policy.render_disclaimer(verdict, claim_texts=texts)
         localized["summary"] = summary or ""
-        return verdict.model_copy(update={"localized": localized})
+        return verdict.model_copy(update={
+            "localized": localized,
+            "note": summary or verdict.note,  # сводка для UI — русская
+        })
 
     async def _maybe_correct(self, text: str, verdict: PostVerdict,
                              fix_facts: bool | None, budget: Budget) -> PostVerdict:

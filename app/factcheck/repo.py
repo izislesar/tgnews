@@ -166,7 +166,8 @@ class FactcheckRepo:
     # ---------- вердикты ----------
     def save(self, qid: int, verdict: PostVerdict, *, version: str = "") -> None:
         now = time.time()
-        summary = verdict.disclaimer or ""
+        summary = ((verdict.localized or {}).get("summary")
+                   or verdict.note or verdict.disclaimer or "")
         with self.lock:
             corrections = json.dumps(
                 [item.model_dump() for item in verdict.corrections], ensure_ascii=False)

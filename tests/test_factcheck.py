@@ -930,13 +930,6 @@ def test_service_rewrites_post_and_drops_label():
     assert verdict.disclaimer is None  # исправленный факт метку не требует
 
 
-def test_body_uses_corrected_text():
-    bot, _store = _stub_bot()
-    verdict = PostVerdict(qid=1, status=Status.SUPPORTED,
-                          corrected_text="✅ **Исправленный текст**",
-                          corrections=[])
-    body = bot._body({"ru_text": "Старый текст", "username": "ch", "ids": "1"}, verdict)
-    assert "Исправленный текст" in body and "Старый текст" not in body
 
 
 def test_repo_persists_correction(tmp_path):
@@ -1409,3 +1402,100 @@ def test_worldbank_picks_recipient_country():
     claim2 = Claim(idx=0, text="Remittances received in Mexico from the USA in 2010",
                    ctype=ClaimType.NUMERIC, priority=Priority.CORE, numbers=["2010"])
     assert wb._country(claim2) == "MEX"
+
+
+def test_body_never_shows_english_correction():
+    bot, _store = _stub_bot()
+    verdict = PostVerdict(qid=1, status=Status.SUPPORTED,
+                          corrected_text="English corrected text",
+                          localized={"summary": "", "claims": [], "corrections": []})
+    post = {"ru_text": "Русский исправленный текст", "username": "ch", "ids": "1"}
+    body = bot._body(post, verdict)
+    assert "Русский исправленный текст" in body
+    assert "English corrected" not in body
+
+
+def test_service_note_is_localized_summary(monkeypatch):
+    from app.factcheck.service import FactCheckService
+
+    monkeypatch.setattr(policy, "MIN_COVERAGE", 2)
+
+    class FakeLocalizer:
+        async def localize(self, verdict):
+            return {"claims": [{"idx": 0, "text": "рус", "note": "н"}],
+                    "corrections": []}
+
+    claim = core_claim("Погибли 29 человек")
+    judge = FakeJudge([ClaimVerdict(claim=claim, status=Status.NOT_FOUND, coverage=6)])
+    service = FactCheckService(
+        settings=make_settings(), repo=None, search=FakeSearch(HITS),
+        fetcher=FakeFetch(DOCS), judge=judge,
+        extractor=ClaimExtractor(FakeLlm(CLAIM_PAYLOAD), FakePrompts(), max_claims=3),
+        prompts=FakePrompts(), localizer=FakeLocalizer())
+    verdict = asyncio.run(service.check_text("text", tier="t1"))
+    assert verdict.note.startswith("⚠️")
+    assert "Погибло" in verdict.note or "рус" in verdict.note
+
+
+def test_repo_stores_localized_summary(tmp_path):
+    _con, repo = _repo_with_post(tmp_path)
+    repo.save(1, PostVerdict(qid=1, status=Status.NOT_FOUND,
+                             localized={"summary": "⚠️ Русская метка",
+                                        "claims": [], "corrections": []},
+                             note="⚠️ Русская метка",
+                             claims=[ClaimVerdict(claim=core_claim(),
+                                                  status=Status.NOT_FOUND)]),
+              version="v")
+    loaded = repo.load(1)
+    assert "Русская метка" in loaded.note
+
+
+def test_widget_shows_localized_corrections():
+    from app.factcheck.widget import render_widget
+    from app.factcheck.models import CorrectionItem
+
+    verdict = PostVerdict(qid=1, status=Status.SUPPORTED,
+                          corrections=[CorrectionItem(
+                              claim_idx=0, claim="x", old="29 killed", new="12 killed",
+                              source_url="https://www.reuters.com/a")],
+                          claims=[ClaimVerdict(claim=core_claim(), status=Status.REFUTED,
+                                               corrected=True, coverage=6)])
+    text = render_widget(verdict, localized={
+        "claims": [{"idx": 0, "text": "Погибли 29", "note": ""}],
+        "corrections": [{"idx": 0, "old": "29 погибших", "new": "12 погибших"}],
+    })
+    assert "Исправлено" in text
+    assert "29 погибших" in text and "12 погибших" in text
+    assert "reuters.com" in text
+
+
+def test_verdict_text_shows_localized_corrections():
+    bot, _ = _stub_bot()
+    from app.factcheck.models import CorrectionItem
+
+    verdict = PostVerdict(qid=3, status=Status.SUPPORTED,
+                          corrections=[CorrectionItem(
+                              claim_idx=0, claim="x", old="29", new="12",
+                              source_url="https://reuters.com/a")],
+                          claims=[ClaimVerdict(claim=core_claim(), status=Status.REFUTED,
+                                               corrected=True, coverage=6)],
+                          localized={"claims": [{"idx": 0, "text": "Погибли 29", "note": ""}],
+                                     "corrections": [{"idx": 0, "old": "29", "new": "12"}],
+                                     "summary": ""})
+    text = bot._verdict_text(verdict)
+    assert "Исправлено" in text and "12" in text
+
+
+def test_widget_for_skipped_post_says_no_claims(monkeypatch):
+    bot, _store = _stub_bot()
+    sent = []
+
+    async def fake_send(chat_id, text, **kwargs):
+        sent.append(text)
+        return type("M", (), {"message_id": 1})()
+
+    monkeypatch.setattr(bot.bot, "send_message", fake_send)
+    asyncio.run(bot._send_widget(1, 5, PostVerdict(qid=5, status=Status.SKIPPED,
+                                                    claims=[])))
+    assert sent and "проверяемых утверждений" in sent[0]
+    assert "идёт" not in sent[0]
