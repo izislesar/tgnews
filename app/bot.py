@@ -633,13 +633,14 @@ class AdminBot:
             lines.append("")
             lines.append(f"ℹ️ По части утверждений просмотрено меньше "
                          f"{policy.MIN_COVERAGE} источников — вывод не делаем, метки нет.")
+        summary = (verdict.localized or {}).get("summary") or verdict.disclaimer
         if verdict.degraded:
             lines.append("")
             lines.append("⚠️ Проверка не завершилась: поиск/загрузка были недоступны. "
                          "Нажми «Проверка» ещё раз, чтобы перепроверить.")
-        elif verdict.disclaimer:
+        elif summary:
             lines.append("")
-            lines.append(html.escape(verdict.disclaimer))
+            lines.append(html.escape(summary))
             lines.append("<i>Метка значит, что подтверждения в открытых источниках "
                          "не нашлось — это не утверждение о ложности.</i>")
         text = "\n".join(lines)

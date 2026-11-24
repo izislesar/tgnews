@@ -16,6 +16,11 @@ API = "https://api.worldbank.org/v2"
 INDICATORS: dict[str, tuple[str, str]] = {
     "remittance": ("BX.TRF.PWKR.CD.DT", "personal remittances received"),
     "remittances": ("BX.TRF.PWKR.CD.DT", "personal remittances received"),
+    "money transfer": ("BX.TRF.PWKR.CD.DT", "personal remittances received"),
+    "money transfers": ("BX.TRF.PWKR.CD.DT", "personal remittances received"),
+    "money remittance": ("BX.TRF.PWKR.CD.DT", "personal remittances received"),
+    "migrant remittance": ("BX.TRF.PWKR.CD.DT", "personal remittances received"),
+    "transfers to": ("BX.TRF.PWKR.CD.DT", "personal remittances received"),
     "population": ("SP.POP.TOTL", "population"),
     "gdp": ("NY.GDP.MKTP.CD", "GDP"),
     "inflation": ("FP.CPI.TOTL.ZG", "inflation, consumer prices"),
@@ -37,7 +42,7 @@ COUNTRY_HINTS = {
     "spain": "ESP", "libya": "LBY", "syria": "SYR", "egypt": "EGY",
 }
 
-_YEAR = re.compile(r"\b(19|20)\d{2}\b")
+_YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
 _NUM = re.compile(r"\d[\d\s.,]*")
 
 
@@ -80,9 +85,7 @@ class WorldBankStats:
             return []
         code, name = indicator
         snippets: list[Snippet] = []
-        for year in years[:3]:
-            full_year = re.search(rf"\b(?:19|20){year[-2:]}\b", claim.text)
-            year_value = full_year.group(0) if full_year else year
+        for year_value in years[:3]:
             key = (country, code, year_value)
             if key not in self._cache:
                 url = (f"{API}/country/{country}/indicator/{code}"

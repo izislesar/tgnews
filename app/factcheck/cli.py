@@ -45,14 +45,21 @@ def _short_url(url: str, limit: int = 86) -> str:
     return url if len(url) <= limit else url[: limit - 1] + "…"
 
 
+def _loc_map(verdict) -> dict[int, dict]:
+    loc = getattr(verdict, "localized", None) or {}
+    return {int(item.get("idx", -1)): item for item in loc.get("claims", [])}
+
+
 def _print_human(verdict, text: str) -> None:
     print("=" * 78)
     print(f"ПОСТ: {' '.join(text.split())[:300]}")
     print("=" * 78)
+    loc = _loc_map(verdict)
     for item in verdict.claims:
         flag = "" if item.claim.is_core else " (secondary)"
+        claim_text = loc.get(item.claim.idx, {}).get("text") or item.claim.text
         print(f"\n[{item.claim.ctype.value}/{item.claim.priority.value}]{flag} "
-              f"«{item.claim.text}»")
+              f"«{claim_text}»")
         print(f"  -> {item.status.value} conf={item.confidence:.2f} "
               f"источников={item.coverage} cycles={item.cycles} "
               f"note={item.note[:140]!r}")
@@ -63,7 +70,7 @@ def _print_human(verdict, text: str) -> None:
     print("\n" + "-" * 78)
     print(f"ИТОГ: {verdict.status.value} | вызовов LLM: {verdict.calls} | "
           f"{verdict.elapsed_s}s")
-    disclaimer = verdict.disclaimer
+    disclaimer = (verdict.localized or {}).get("summary") or verdict.disclaimer
     print(f"ДИСКЛЕЙМЕР: {disclaimer or '— (не нужен)'}")
     if verdict.corrections:
         print("\nИСПРАВЛЕНО (вариант 2):")

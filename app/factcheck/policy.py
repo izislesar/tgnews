@@ -449,8 +449,10 @@ def labeled_claims(verdict: PostVerdict) -> list[ClaimVerdict]:
     return out
 
 
-def render_disclaimer(verdict: PostVerdict) -> str | None:
+def render_disclaimer(verdict: PostVerdict,
+                      claim_texts: dict[int, str] | None = None) -> str | None:
     """Текст метки или None. Ставится только по core-утверждениям."""
+    claim_texts = claim_texts or {}
     if verdict.degraded:  # инфраструктура не дала проверить — метку не врём
         return None
     status = aggregate(verdict.claims) if verdict.claims else verdict.status
@@ -462,7 +464,7 @@ def render_disclaimer(verdict: PostVerdict) -> str | None:
     claims = labeled_claims(verdict)
     if not claims:
         return None
-    parts = [_quote(item.claim.text) for item in claims[:3]]
+    parts = [_quote(claim_texts.get(item.claim.idx, item.claim.text)) for item in claims[:3]]
     return template.format(claims=", ".join(parts))
 
 

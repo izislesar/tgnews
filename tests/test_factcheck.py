@@ -1247,7 +1247,8 @@ def test_worldbank_lookup_returns_stat_snippet():
     wb = WorldBankStats()
     wb._fetch = lambda url: [{"page": 1}, [{
         "country": {"value": "Mexico"}, "date": "2025", "value": 65086796940}]]
-    claim = Claim(idx=0, text="Remittances to Mexico in 2025 reached 65.5 billion USD",
+    claim = Claim(idx=0, text="Money transfers from the USA to Mexico in 2025 "
+                              "reached 65.5 billion USD",
                   ctype=ClaimType.NUMERIC, priority=Priority.CORE, numbers=["65.5"])
     snippets = asyncio.run(wb.lookup(claim))
     assert snippets
@@ -1334,3 +1335,11 @@ def test_widget_uses_localized_text():
         {"idx": 0, "text": "Погибло 29 человек", "note": "нет данных"}], "corrections": []})
     assert "Погибло 29 человек" in text
     assert "нет данных" in text
+
+
+def test_disclaimer_uses_localized_claim_text():
+    verdict = PostVerdict(status=Status.NOT_FOUND, claims=[
+        ClaimVerdict(claim=core_claim("Погибли 29 человек"), status=Status.NOT_FOUND,
+                     coverage=5)])
+    text = policy.render_disclaimer(verdict, claim_texts={0: "Погибло 29 человек"})
+    assert "Погибло 29 человек" in text
