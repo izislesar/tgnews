@@ -115,14 +115,14 @@ def fmt_html(text: str) -> str:
     for line in text.split("\n"):
         stripped = line.strip()
         if stripped.startswith(">>"):
-            qbuf.append(stripped[2:].strip())
+            quote = stripped[2:].strip().replace("**", "").replace("__", "")
+            qbuf.append(re.sub(r"</?b>", "", quote, flags=re.I))
             continue
         flush_q()
-        s = html.escape(line, quote=False)
-        s = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", s, flags=re.S)
+        # жирный запрещён: срезаем любые его следы, единственное форматирование — цитаты
+        clean = re.sub(r"</?b>", "", line, flags=re.I).replace("**", "").replace("__", "")
+        s = html.escape(clean, quote=False)
         s = re.sub(r"(?<![/\"'>])\b(https?://[^\s<]+)", r'<a href="\1">\1</a>', s)
-        if s.count("<b>") != s.count("</b>"):
-            s = re.sub(r"</?b>", "", s)
         out.append(s)
     flush_q()
     return "\n".join(out)

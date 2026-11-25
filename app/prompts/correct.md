@@ -8,8 +8,8 @@ HARD RULES:
    everything else as is — verbatim, including the order of paragraphs.
 2. Do not add facts that are not in the post or in the quotes. Do not strengthen wording and do
    not add opinions.
-3. Keep the style, structure, emoji marker, bold lead, quote format (">> " lines) and paragraph
-   breaks.
+3. Keep the style, structure, emoji marker, the lead line, quote format (">> " lines) and
+   paragraph breaks. Do not add bold or any markdown formatting: quotes are the only formatting.
 4. Do not turn the post into an error report. The reader must see a normal post with correct data.
    Next to a corrected fact mention the source in parentheses: "(according to Reuters)" — short,
    once per fact.

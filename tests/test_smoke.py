@@ -10,11 +10,12 @@ from app.store import _jaccard, _tokens, Store  # noqa: E402
 from app.worker import BLACK_RE  # noqa: E402
 
 
-def test_fmt_html_blockquote():
-    t = "🗣 **Лид с атрибуцией:**\n\n>> «Цитата спикера целиком»\n\nИсточник: https://t.me/s/1\n"
+def test_fmt_html_blockquote_without_bold():
+    t = "🗣 Лид с атрибуцией:\n\n>> «Цитата спикера целиком»\n\nИсточник: https://t.me/s/1\n"
     r = fmt_html(t)
     assert "<blockquote>«Цитата спикера целиком»</blockquote>" in r
-    assert "<b>Лид с атрибуцией:</b>" in r
+    assert "<b>" not in r and "**" not in r
+    assert "Лид с атрибуцией:" in r
     assert '<a href="https://t.me/s/1">' in r
 
 
@@ -24,9 +25,10 @@ def test_fmt_html_expandable():
     assert "<blockquote expandable>" in r
 
 
-def test_fmt_html_unclosed_bold_fallback():
-    r = fmt_html("**незакрытый жирный")
-    assert "<b>" not in r and "**" in r
+def test_fmt_html_strips_bold_markers():
+    r = fmt_html("**случайный жирный** и текст")
+    assert "<b>" not in r and "**" not in r
+    assert "случайный жирный и текст" in r
 
 
 def test_batch_parser():
@@ -99,3 +101,16 @@ def test_store_scores_small_channel():
     st.upsert_post(2, "big", "2", "k2", "Президент Франции выступил на саммите ЕС в Брюсселе", 30000, 200, 0)
     cands = st.candidates(1, limit=2)
     assert cands[0][1] == "small"  # нормировка: у small это 60% аудитории, у big — 2.7%
+
+
+def test_fmt_html_strips_html_bold_tags():
+    r = fmt_html("<b>лид</b> и **ещё** жирный")
+    assert "<b>" not in r and "**" not in r
+    assert "лид и ещё жирный" in r
+
+
+def test_fmt_html_quotes_stay_quotes():
+    r = fmt_html("Текст\n>> **цитата** спикера\n>> вторая строка")
+    assert "<blockquote>" in r
+    assert "**" not in r and "<b>" not in r
+    assert "цитата спикера\nвторая строка" in r
